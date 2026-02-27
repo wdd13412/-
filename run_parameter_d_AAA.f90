@@ -16,10 +16,12 @@ program RUN_MAIN_NODIFF
 
 
     if (allocated(cellprimitivesoutd)) then
-        print *, "AD dField sample cell 2210:", &
-     &      cellprimitivesoutd(2210,1), cellprimitivesoutd(2210,2), &
-     &      cellprimitivesoutd(2210,3), cellprimitivesoutd(2210,4), &
-     &      cellprimitivesoutd(2210,5)
+        if (size(cellprimitivesoutd, 1) >= 2210 .and. size(cellprimitivesoutd, 2) >= 5) then
+            print *, "AD dField sample cell 2210:", &
+         &      cellprimitivesoutd(2210,1), cellprimitivesoutd(2210,2), &
+         &      cellprimitivesoutd(2210,3), cellprimitivesoutd(2210,4), &
+         &      cellprimitivesoutd(2210,5)
+        end if
     end if
     ! 输出结果信息（可选）
     if (allocated(cellprimitivesout)) then

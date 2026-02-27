@@ -2812,11 +2812,7 @@ CONTAINS
     REAL(kind=8), ALLOCATABLE :: fdeltasd(:, :), fdgradsd(:, :, :)
     INTEGER(kind=8) :: f, ownercell, neighbourcell, v, i1, i2, ncells, &
 &   nfaces, nboundaries, nbdryfaces, nvars, meshinfo(4), i, max_col
-! 控制输出面数量			
-    INTEGER(kind=8) :: print_eps, print_face
     INTRINSIC SIZE
-    INTRINSIC NEW_LINE
-    INTRINSIC MIN
     INTRINSIC REAL
     CALL UNSTRUCTUREDMESHINFO(mesh, meshinfo)
     ncells = meshinfo(1)
@@ -2831,61 +2827,16 @@ CONTAINS
 ! #### 2. 计算中央差分通量 ####
     CALL LININTERP_3D_D(mesh, meshd, sln%cellfluxes, slnd%cellfluxes, &
 &                 sln%facefluxes, slnd%facefluxes)
-! 输出前10个cellFluxes
-    WRITE(*, *) 'cellFluxes:'
-!		do i = 1, min(5, size(sln%cellFluxes,1))
-!		    write(*,'(I5,*(E12.5))') i, sln%cellFluxes(i,:)
-    WRITE(*, '(I5,*(E12.5))') 2210, sln%cellfluxes(2210, :)
-    write(*,'(I5,*(E12.5))') 2305, sln%cellFluxes(2305,:)
-!		end do
-    WRITE(*, *) 'slnd%cellFluxes(微分):'
-!		do i = 1, min(5, size(slnd%cellFluxes,1))
-!		    write(*,'(I5,*(E12.5))') i, slnd%cellFluxes(i,:)
-	write(*,'(I5,*(E12.5))') 2210, slnd%cellFluxes(2210,:)
-	write(*,'(I5,*(E12.5))') 2305, slnd%cellFluxes(2305,:)
-!		end do		
-! 输出前10个faceFluxes - 修正这里使用size获取行数
-    WRITE(*, *) '更新前faceFluxes:'
-!		do f = 1, min(5, size(sln%faceFluxes,1))
-!		    write(*,'(I5,*(E12.5))') f, sln%faceFluxes(f,:)
-!		end do
-	WRITE(*, '(I5,*(E12.5))') 4466, sln%facefluxes(4466, :)
-    WRITE(*, *) '更新前slnd%faceFluxes(微分):'
-!		do f = 1, min(5, size(slnd%faceFluxes,1))
-!		    write(*,'(I5,*(E12.5))') f, slnd%faceFluxes(f,:)
-	write(*,'(I5,*(E12.5))') 4466, slnd%faceFluxes(4466,:)
-!		end do
 ! #### 3. 计算 JST 人工扩散通量 ####
     ALLOCATE(fdeltasd(nfaces, nvars), source=0.0d0)
     ALLOCATE(fdeltas(nfaces, nvars), source=0.0d0)
 ! 单元变量在面的差值
     CALL FACEDELTAS_D(mesh, sln, slnd, fdeltas, fdeltasd)
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! 新增：输出前5个面的 fdeltasd（微分面差值）
-    PRINT*, NEW_LINE('a')//&
-&   '=fdeltasd（微分面差值） ==='
-    IF (5 .GT. nfaces) THEN
-      print_face = nfaces
-    ELSE
-      print_face = 5
-    END IF
-!		DO f=1,print_face
-!		  WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', f, ': ', (fdeltasd(f, v), v=1, nvars)
-	WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', 4466, ': ', (fdeltasd(4466, v), v=1, nvars)
-!		END DO
-    PRINT*, NEW_LINE('a')//'=== 前5个面：fdeltas（面差值） ==='
-!		DO f=1,print_face
-!		  WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', f, ': ', (fdeltas(f, v), v=1, nvars)
-	WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', 4466, ': ', (fdeltas(4466, v), v=1, nvars)
-!		END DO
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     ALLOCATE(fdgradsd(ncells, nvars, 3), source=0.0d0)
     ALLOCATE(fdgrads(ncells, nvars, 3), source=0.0d0)
-    PRINT*, 'AAA'
 ! 差值的梯度
     CALL GREENGAUSSGRAD_D(mesh, meshd, fdeltas, fdeltasd, .false., fdgrads, &
 &                    fdgradsd)
-    PRINT*, 'BBB'
     ALLOCATE(eps2d(nfaces), source=0.0d0)
     eps2d = 0.0_8
     ALLOCATE(eps2(nfaces), source=0.0d0)
@@ -2894,22 +2845,6 @@ CONTAINS
     ALLOCATE(eps(nfaces, 2), source=0.0d0)
 ! 二阶和四阶人工扩散系数
     CALL UNSTRUCTURED_JSTEPS_D(mesh, meshd, sln, slnd, fluid, eps, epsd)
-    PRINT*, 'CCC'
-    IF (5 .GT. nfaces) THEN
-      print_eps = nfaces
-    ELSE
-      print_eps = 5
-    END IF
-    PRINT*, NEW_LINE('a')//&
-&   '=== 前5个面的eps值（二阶/四阶） ==='
-    PRINT*, '格式：面索引 | eps2（二阶） | eps4（四阶）'
-!		DO f = 1, print_eps
-!			WRITE(*, '(I5, 2ES14.6)') f, eps(f, 1), eps(f, 2)  ! 用科学计数法适配可能的小数值
-!		END DO
-    WRITE(*, '(I5, 2ES14.6)') 4466, eps(4466, 1), eps(4466, 2)
-    PRINT *, '格式：面索引 | eps2d（二阶） | eps4d（四阶）'
-	WRITE(*, '(I5, 2ES14.6)') 4466, epsd(4466, 1), epsd(4466, 2)
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	
 ! 二阶耗散系数
     eps2d = epsd(:, 1)
     eps2 = eps(:, 1)
@@ -2966,16 +2901,6 @@ CONTAINS
 !\90\91量转化为单位向量
       CALL NORMALIZE_D(mesh%favecs(f, :), meshd%favecs(f, :), unitfa, &
 &                unitfad)
-! 新增：输出前5个面的 diffusionfluxd（微分扩散通量）和 unitfad（微分单位法向量）
-
-!			IF (f .LE. 5) THEN
- 	  IF (f == 4466) THEN
-		WRITE(*, '(A,I3,A)') NEW_LINE('a')//'--- 面 ', f, '：微分扩散通量 & 单位法向量 ---'		
-		WRITE(*, '(A,*(ES16.8,1X))') '  diffusionflux: ', (diffusionflux(v), v=1, nvars)
-		WRITE(*, '(A,*(ES16.8,1X))') '  diffusionfluxd: ', (diffusionfluxd(v), v=1, nvars)
-		WRITE(*, '(A,3(ES16.8,1X))') '  unitfa (x/y/z): ', unitfa(1), unitfa(2), unitfa(3)
-		WRITE(*, '(A,3(ES16.8,1X))') '  unitfad (x/y/z): ', unitfad(1), unitfad(2), unitfad(3)
-	  END IF
       DO v=1,nvars
         i1 = (v-1)*3 + 1
         i2 = i1 + 2
@@ -2986,14 +2911,6 @@ CONTAINS
 &         diffusionflux(v)*unitfa
       END DO
     END DO
-! 输出前10个faceFluxes - 修正这里使用size获取行数
-    WRITE(*, *) '更新后sln%facefluxes:'
-!		do f = 1, min(10, size(sln%faceFluxes,1))
-!		    write(*,'(I5,*(E12.5))') f, sln%faceFluxes(f,:)
-    WRITE(*, '(I5,*(E12.5))') 4466, sln%facefluxes(4466, :)
-!		end do
-	WRITE(*, *) '更新后slnd%facefluxes:'
-    WRITE(*, '(I5,*(E12.5))') 4466, slnd%facefluxes(4466, :)
 ! #### 4. 将面通量积分到单元内部，得到单元残差 ####
     ALLOCATE(unstructured_jstfluxxd(ncells, nvars), source=0.0d0)
     ALLOCATE(unstructured_jstfluxx(ncells, nvars), source=0.0d0)
@@ -3049,7 +2966,7 @@ CONTAINS
     TYPE(SOLUTIONSTATE), INTENT(INOUT) :: sln
     TYPE(BOUNDARYCONDITION), INTENT(IN) :: boundaryconditions(:)
     TYPE(FLUIDD), INTENT(IN) :: fluid
-    REAL(kind=8) :: d(3), dd(3), grad_v(3), grad_vd(3), dot_grad_v, dot_grad_vd
+    REAL(kind=8) :: d(3), grad_v(3), dot_grad_v
     REAL(kind=8), ALLOCATABLE, INTENT(OUT) :: unstructured_jstfluxx(:, :&
 &   )
     REAL(kind=8), ALLOCATABLE :: eps2(:), eps4(:), diffusionflux(:), &
@@ -3057,11 +2974,7 @@ CONTAINS
     REAL(kind=8), ALLOCATABLE :: fdeltas(:, :), fdgrads(:, :, :)
     INTEGER(kind=8) :: f, ownercell, neighbourcell, v, i1, i2, ncells, &
 &   nfaces, nboundaries, nbdryfaces, nvars, meshinfo(4), i, max_col
-! 控制输出面数量			
-    INTEGER(kind=8) :: print_eps, print_face
     INTRINSIC SIZE
-    INTRINSIC NEW_LINE
-    INTRINSIC MIN
     INTRINSIC REAL
     CALL UNSTRUCTUREDMESHINFO(mesh, meshinfo)
     ncells = meshinfo(1)
@@ -3075,77 +2988,18 @@ CONTAINS
 &                           nboundaries, fluid)
 ! #### 2. 计算中央差分通量 ####
     CALL LININTERP_3D(mesh, sln%cellfluxes, sln%facefluxes)
-! 输出前10个cellFluxes
-    WRITE(*, *) 'First 10 cellFluxes:'
-!		do i = 1, min(5, size(sln%cellFluxes,1))
-!		    write(*,'(I5,*(E12.5))') i, sln%cellFluxes(i,:)
-    WRITE(*, '(I5,*(E12.5))') 2210, sln%cellfluxes(2210, :)
-!		end do
-    WRITE(*, *) 'First 10 slnd%cellFluxes(微分):'
-!		do i = 1, min(5, size(slnd%cellFluxes,1))
-!		    write(*,'(I5,*(E12.5))') i, slnd%cellFluxes(i,:)
-!		write(*,'(I5,*(E12.5))') 2210, slnd%cellFluxes(2210,:)
-!		end do		
-! 输出前10个faceFluxes - 修正这里使用size获取行数
-    WRITE(*, *) 'First 10 faceFluxes:'
-!		do f = 1, min(5, size(sln%faceFluxes,1))
-!		    write(*,'(I5,*(E12.5))') f, sln%faceFluxes(f,:)
-!		end do
-!		IF (f == 4466) THEN
-!		   WRITE(*, '(I5,*(E12.5))') f, sln%facefluxes(f, :)
-!		end if
-    WRITE(*, *) 'First 10 slnd%faceFluxes(微分):'
-!		do f = 1, min(5, size(slnd%faceFluxes,1))
-!		    write(*,'(I5,*(E12.5))') f, slnd%faceFluxes(f,:)
-!		write(*,'(I5,*(E12.5))') 4466, slnd%faceFluxes(4466,:)
-!		end do
 ! #### 3. 计算 JST 人工扩散通量 ####
     ALLOCATE(fdeltas(nfaces, nvars), source=0.0d0)
 ! 单元变量在面的差值
     CALL FACEDELTAS(mesh, sln, fdeltas)
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! 新增：输出前5个面的 fdeltasd（微分面差值）
-    PRINT*, NEW_LINE('a')//&
-&   '=== 前5个面：fdeltasd（微分面差值） ==='
-    IF (5 .GT. nfaces) THEN
-      print_face = nfaces
-    ELSE
-      print_face = 5
-    END IF
-!		DO f=1,print_face
-!		  WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', f, ': ', (fdeltasd(f, v), v=1, nvars)
-!		WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', 4466, ': ', (fdeltasd(4466, v), v=1, nvars)
-!		END DO
-    PRINT*, NEW_LINE('a')//'=== 前5个面：fdeltas（面差值） ==='
-!		DO f=1,print_face
-!		  WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', f, ': ', (fdeltas(f, v), v=1, nvars)
-!		WRITE(*, '(A,I3,A,*(ES16.8,1X))') '  面 ', 4466, ': ', (fdeltas(4466, v), v=1, nvars)
-!		END DO
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     ALLOCATE(fdgrads(ncells, nvars, 3), source=0.0d0)
-    PRINT*, 'AAA'
 ! 差值的梯度
     CALL GREENGAUSSGRADD(mesh, fdeltas, .false., fdgrads)
-    PRINT*, 'BBB'
     ALLOCATE(eps2(nfaces), source=0.0d0)
     ALLOCATE(eps4(nfaces), source=0.0d0)
     ALLOCATE(eps(nfaces, 2), source=0.0d0)
 ! 二阶和四阶人工扩散系数
     CALL UNSTRUCTURED_JSTEPS(mesh, sln, fluid, eps)
-    PRINT*, 'CCC'
-    IF (5 .GT. nfaces) THEN
-      print_eps = nfaces
-    ELSE
-      print_eps = 5
-    END IF
-    PRINT*, NEW_LINE('a')//&
-&   '=== 前5个面的eps值（二阶/四阶） ==='
-    PRINT*, '格式：面索引 | eps2（二阶） | eps4（四阶）'
-!		DO f = 1, print_eps
-!			WRITE(*, '(I5, 2ES14.6)') f, eps(f, 1), eps(f, 2)  ! 用科学计数法适配可能的小数值
-!		END DO
-    WRITE(*, '(I5, 2ES14.6)') 4466, eps(4466, 1), eps(4466, 2)
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	
 ! 二阶耗散系数
     eps2 = eps(:, 1)
 ! 四阶耗散系数
@@ -3183,14 +3037,6 @@ CONTAINS
 ! mesh.fAVecs是面法向量(通过面的子三角形的叉乘求法向量，然后相加作为面的法向量) ,normalize将法\E5
 !\90\91量转化为单位向量
       CALL NORMALIZE(mesh%favecs(f, :), unitfa)
-! 新增：输出前5个面的 diffusionfluxd（微分扩散通量）和 unitfad（微分单位法向量）
-      PRINT*, '微分扩散通量,单位法向量'
-!			IF (f .LE. 5) THEN
-!			IF (f == 4466) THEN
-!				WRITE(*, '(A,I3,A)') NEW_LINE('a')//'--- 面 ', f, '：微分扩散通量 & 单位法向量 ---'
-!				WRITE(*, '(A,*(ES16.8,1X))') '  diffusionfluxd: ', (diffusionfluxd(v), v=1, nvars)
-!				WRITE(*, '(A,3(ES16.8,1X))') '  unitfad (x/y/z): ', unitfad(1), unitfad(2), unitfad(3)
-!			END IF
       DO v=1,nvars
         i1 = (v-1)*3 + 1
         i2 = i1 + 2
@@ -3199,13 +3045,6 @@ CONTAINS
 &         diffusionflux(v)*unitfa
       END DO
     END DO
-! 输出前10个faceFluxes - 修正这里使用size获取行数
-    WRITE(*, *) 'First 10 faceFluxes:'
-!		do f = 1, min(10, size(sln%faceFluxes,1))
-!		    write(*,'(I5,*(E12.5))') f, sln%faceFluxes(f,:)
-    WRITE(*, '(I5,*(E12.5))') 4466, sln%facefluxes(4466, :)
-!		end do
-    WRITE(*, '(I5,*(E12.5))') 4466, sln%facefluxes(4466, :)
 ! #### 4. 将面通量积分到单元内部，得到单元残差 ####
     ALLOCATE(unstructured_jstfluxx(ncells, nvars), source=0.0d0)
     CALL INTEGRATEFLUXES_UNSTRUCTURED3D(mesh, sln, unstructured_jstfluxx&
