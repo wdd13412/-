@@ -288,11 +288,7 @@ CONTAINS
       arg1d = fluid%gammaa*fluid%r*facetd
       arg1 = fluid%gammaa*fluid%r*facet
       temp0 = SQRT(arg1)
-      IF (arg1 .EQ. 0.0) THEN
-        ad = arg1d/(2.0*temp0)!0.0_8
-      ELSE
-        ad = arg1d/(2.0*temp0)
-      END IF
+      ad = arg1d/(2.0*temp0)
       a = temp0
       CALL MAG_D(mesh%favecs(f, :), meshd%favecs(f, :), mag_val, &
 &          mag_vald)
@@ -737,6 +733,8 @@ CONTAINS
 &   createrestartfile, createvtkoutput
     CHARACTER(len=32) :: timeintegrationfn, fluxfunction
     REAL(kind=8) :: initdt, endtime, outputinterval, targetcfl
+    CHARACTER(len=64) :: env_val
+    INTEGER :: env_len, env_status
     TYPE(FLUIDD) :: fluid
     CHARACTER(len=256) :: restartfile
 ! 新增：用于输出的变量!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
@@ -760,6 +758,11 @@ CONTAINS
     initdt = 0.0000001
 ! 已知总仿真时间!!!!!
     endtime = 1
+    CALL GET_ENVIRONMENT_VARIABLE("CFD_ENDTIME", env_val, LENGTH=env_len, STATUS=env_status)
+    IF (env_status .EQ. 0 .AND. env_len .GT. 0) THEN
+      READ(env_val(1:env_len), *, IOSTAT=env_status) endtime
+      IF (env_status .NE. 0) endtime = 1
+    END IF
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -960,6 +963,8 @@ CONTAINS
 &   createrestartfile, createvtkoutput
     CHARACTER(len=32) :: timeintegrationfn, fluxfunction
     REAL(kind=8) :: initdt, endtime, outputinterval, targetcfl
+    CHARACTER(len=64) :: env_val
+    INTEGER :: env_len, env_status
     TYPE(FLUIDD) :: fluid
     CHARACTER(len=256) :: restartfile
 ! 新增：用于输出的变量!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
@@ -983,6 +988,11 @@ CONTAINS
     initdt = 0.0000001
 ! 已知总仿真时间!!!!!
     endtime = 2500
+    CALL GET_ENVIRONMENT_VARIABLE("CFD_ENDTIME", env_val, LENGTH=env_len, STATUS=env_status)
+    IF (env_status .EQ. 0 .AND. env_len .GT. 0) THEN
+      READ(env_val(1:env_len), *, IOSTAT=env_status) endtime
+      IF (env_status .NE. 0) endtime = 2500
+    END IF
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -2302,8 +2312,8 @@ CONTAINS
     ALLOCATE(gradpd(ncells, 3), source=0.0d0)
     gradpd = 0.0_8
     ALLOCATE(gradp(ncells, 3), source=0.0d0)
-    gradPd = temp_gradd(:, :, 1)
-    gradP = temp_grad(:, :, 1)
+    gradPd = temp_gradd(:, 1, :)
+    gradP = temp_grad(:, 1, :)
 ! 明确提取x方向梯度（第2维第1个元素）
  !   gradpd(:, 1) = temp_gradd(:, 1, 1)
 !    gradp(:, 1) = temp_grad(:, 1, 1)
@@ -2373,7 +2383,7 @@ CONTAINS
       x1 = abs2 + abs4
       IF (x1 .LT. epsilonn) THEN
         max2 = epsilonn
-        max2d = x1d
+        max2d = 0.0_8
       ELSE
         max2d = x1d
         max2 = x1
@@ -2408,7 +2418,7 @@ CONTAINS
       x2 = abs3 + abs5
       IF (x2 .LT. epsilonn) THEN
         max3 = epsilonn
-        max3d = x2d
+        max3d = 0.0_8
       ELSE
         max3d = x2d
         max3 = x2
@@ -2436,7 +2446,7 @@ CONTAINS
         max1 = fluid%gammaa*fluid%r*sln%cellprimitives(c, 2)
       ELSE
         max1 = 1.0d-10
-        max1d = fluid%gammaa*fluid%r*slnd%cellprimitives(c, 2)
+        max1d = 0.0_8
       END IF
       temp0 = SQRT(max1)
       IF (max1 .EQ. 0.0) THEN
@@ -2476,7 +2486,7 @@ CONTAINS
         eps4d(f) = k4_val*rjsjfd(f, 1) - c4_val*eps2d(f)
         eps4(f) = k4_val*rjsjf(f, 1) - c4_val*eps2(f)
       ELSE
-        eps4d(f) = k4_val*rjsjfd(f, 1) - c4_val*eps2d(f)
+        eps4d(f) = 0.0_8
         eps4(f) = 0.0d0
       END IF
     END DO
@@ -2789,15 +2799,15 @@ CONTAINS
     TYPE(SOLUTIONSTATE), INTENT(INOUT) :: slnd
     TYPE(BOUNDARYCONDITION), INTENT(IN) :: boundaryconditions(:)
     TYPE(FLUIDD), INTENT(IN) :: fluid
-    REAL(kind=8) :: d(3), grad_v(3), dot_grad_v
+    REAL(kind=8) :: d(3), dd(3), grad_v(3), grad_vd(3), dot_grad_v, dot_grad_vd
     REAL(kind=8), ALLOCATABLE, INTENT(OUT) :: unstructured_jstfluxx(:, :&
 &   )
     REAL(kind=8), ALLOCATABLE, INTENT(OUT) :: unstructured_jstfluxxd(:, &
 &   :)
     REAL(kind=8), ALLOCATABLE :: eps2(:), eps4(:), diffusionflux(:), &
 &   unitfa(:), fd(:), farownerfd(:), farneighbourfd(:), eps(:, :)
-    REAL(kind=8), ALLOCATABLE :: eps2d(:), diffusionfluxd(:), unitfad(:)&
-&   , fdd(:), epsd(:, :)
+    REAL(kind=8), ALLOCATABLE :: eps2d(:), eps4d(:), diffusionfluxd(:), unitfad(:)&
+&   , fdd(:), farownerfdd(:), farneighbourfdd(:), epsd(:, :)
     REAL(kind=8), ALLOCATABLE :: fdeltas(:, :), fdgrads(:, :, :)
     REAL(kind=8), ALLOCATABLE :: fdeltasd(:, :), fdgradsd(:, :, :)
     INTEGER(kind=8) :: f, ownercell, neighbourcell, v, i1, i2, ncells, &
@@ -2873,7 +2883,7 @@ CONTAINS
     ALLOCATE(fdgrads(ncells, nvars, 3), source=0.0d0)
     PRINT*, 'AAA'
 ! 差值的梯度
-    CALL GREENGAUSSGRADD_D(mesh, meshd, fdeltas, .false., fdgrads, &
+    CALL GREENGAUSSGRAD_D(mesh, meshd, fdeltas, fdeltasd, .false., fdgrads, &
 &                    fdgradsd)
     PRINT*, 'BBB'
     ALLOCATE(eps2d(nfaces), source=0.0d0)
@@ -2905,6 +2915,8 @@ CONTAINS
     eps2 = eps(:, 1)
 ! 四阶耗散系数
     eps4 = eps(:, 2)
+    ALLOCATE(eps4d(nfaces), source=0.0d0)
+    eps4d = epsd(:, 2)
     IF (ALLOCATED(epsd)) THEN
       DEALLOCATE(epsd)
     END IF
@@ -2920,10 +2932,13 @@ CONTAINS
     ALLOCATE(fd(nvars), source=0.0d0)
     ALLOCATE(farownerfd(nvars), source=0.0d0)
     ALLOCATE(farneighbourfd(nvars), source=0.0d0)
+    ALLOCATE(farownerfdd(nvars), source=0.0d0)
+    ALLOCATE(farneighbourfdd(nvars), source=0.0d0)
     DO f=1,nfaces-nbdryfaces
       ownercell = mesh%faces(f, 1)
       neighbourcell = mesh%faces(f, 2)
 ! 这个中心点cCenters是根据面中心点和体中心点加权得到
+      dd = meshd%ccenters(neighbourcell, :) - meshd%ccenters(ownercell, :)
       d = mesh%ccenters(neighbourcell, :) - mesh%ccenters(ownercell, :)
 ! 获取该面的状态差值
       fdd = fdeltasd(f, :)
@@ -2931,18 +2946,21 @@ CONTAINS
 ! 虚拟单元的状态差值（逐个变量计算梯度点积）
 ! 遍历每个变量
       DO v=1,nvars
-! 提取第v个变量在ownerCell处的梯度向量（1维数组：x,y,z方向梯度）				
-! 维度：(单元格, 变量v, 空间维度) → 1维
+! 提取第v个变量在ownerCell处的梯度向量（1维数组：x,y,z方向梯度）
         grad_v = REAL(fdgrads(ownercell, v, :), kind=8)
-        CALL DOT_PRODUCT_REAL(d, grad_v, dot_grad_v, 3)
-! 计算点积（d和grad_v都是1维向量，符合dot_product要求）
+        grad_vd = REAL(fdgradsd(ownercell, v, :), kind=8)
+        CALL DOT_PRODUCT_REAL_D(d, dd, grad_v, grad_vd, dot_grad_v, dot_grad_vd, 3)
         farownerfd(v) = fd(v) - dot_grad_v
+        farownerfdd(v) = fdd(v) - dot_grad_vd
+        grad_v = REAL(fdgrads(neighbourcell, v, :), kind=8)
+        grad_vd = REAL(fdgradsd(neighbourcell, v, :), kind=8)
+        CALL DOT_PRODUCT_REAL_D(d, dd, grad_v, grad_vd, dot_grad_v, dot_grad_vd, 3)
         farneighbourfd(v) = fd(v) + dot_grad_v
+        farneighbourfdd(v) = fdd(v) + dot_grad_vd
       END DO
 ! 人工扩散项 = eps2 * 一阶差值 - eps4 * 二阶差值
-!			diffusionFlux = eps2(f) * fD - eps4(f) * (farNeighbourfD - 2*fD + farOwnerfD)
-      diffusionfluxd = fd*eps2d(f) + eps2(f)*fdd
-      diffusionflux = eps2(f)*fd
+      diffusionflux = eps2(f)*fd - eps4(f)*(farneighbourfd - 2.0d0*fd + farownerfd)
+      diffusionfluxd = fd*eps2d(f) + eps2(f)*fdd - (farneighbourfd - 2.0d0*fd + farownerfd)*eps4d(f) - eps4(f)*(farneighbourfdd - 2.0d0*fdd + farownerfdd)
 ! 将扩散通量添加到面通量上，方向用单位面积向量调整
 ! mesh.fAVecs是面法向量(通过面的子三角形的叉乘求法向量，然后相加作为面的法向量) ,normalize将法\E5
 !\90\91量转化为单位向量
@@ -3009,6 +3027,9 @@ CONTAINS
     DEALLOCATE(fd)
     DEALLOCATE(farownerfd)
     DEALLOCATE(farneighbourfd)
+    DEALLOCATE(farownerfdd)
+    DEALLOCATE(farneighbourfdd)
+    DEALLOCATE(eps4d)
   END SUBROUTINE UNSTRUCTURED_JSTFLUX_D
 
 ! = 
@@ -3028,7 +3049,7 @@ CONTAINS
     TYPE(SOLUTIONSTATE), INTENT(INOUT) :: sln
     TYPE(BOUNDARYCONDITION), INTENT(IN) :: boundaryconditions(:)
     TYPE(FLUIDD), INTENT(IN) :: fluid
-    REAL(kind=8) :: d(3), grad_v(3), dot_grad_v
+    REAL(kind=8) :: d(3), dd(3), grad_v(3), grad_vd(3), dot_grad_v, dot_grad_vd
     REAL(kind=8), ALLOCATABLE, INTENT(OUT) :: unstructured_jstfluxx(:, :&
 &   )
     REAL(kind=8), ALLOCATABLE :: eps2(:), eps4(:), diffusionflux(:), &
@@ -3152,11 +3173,12 @@ CONTAINS
         CALL DOT_PRODUCT_REAL(d, grad_v, dot_grad_v, 3)
 ! 计算点积（d和grad_v都是1维向量，符合dot_product要求）
         farownerfd(v) = fd(v) - dot_grad_v
+        grad_v = REAL(fdgrads(neighbourcell, v, :), kind=8)
+        CALL DOT_PRODUCT_REAL(d, grad_v, dot_grad_v, 3)
         farneighbourfd(v) = fd(v) + dot_grad_v
       END DO
 ! 人工扩散项 = eps2 * 一阶差值 - eps4 * 二阶差值
-!			diffusionFlux = eps2(f) * fD - eps4(f) * (farNeighbourfD - 2*fD + farOwnerfD)
-      diffusionflux = eps2(f)*fd
+      diffusionflux = eps2(f)*fd - eps4(f)*(farneighbourfd - 2.0d0*fd + farownerfd)
 ! 将扩散通量添加到面通量上，方向用单位面积向量调整
 ! mesh.fAVecs是面法向量(通过面的子三角形的叉乘求法向量，然后相加作为面的法向量) ,normalize将法\E5
 !\90\91量转化为单位向量
@@ -3696,8 +3718,8 @@ CONTAINS
     DO bdry=1,nboundaries
 ! 统计当前边界的非零元素个数
       i = 0
-      DO WHILE (i .LT. SIZE(mesh%boundaryfaces, 2) .AND. mesh%&
-&               boundaryfaces(bdry, i+1) .NE. 0)
+      DO WHILE (i .LT. SIZE(mesh%boundaryfaces, 2))
+        IF (mesh%boundaryfaces(bdry, i+1) .EQ. 0) EXIT
         i = i + 1
       END DO
       nbdryfaces = nbdryfaces + i
@@ -3791,10 +3813,10 @@ CONTAINS
     max_faces_per_cell = MAXVAL(cellfacecount)
     ALLOCATE(mesh%cells(ncells, max_faces_per_cell))
     mesh%cells = 0
-    ALLOCATE(meshd%cvols(ncells))
-    ALLOCATE(mesh%cvols(ncells))
-    ALLOCATE(meshd%ccenters(ncells, 3))
-    ALLOCATE(mesh%ccenters(ncells, 3))
+    ALLOCATE(meshd%cvols(ncells), source=0.0d0)
+    ALLOCATE(mesh%cvols(ncells), source=0.0d0)
+    ALLOCATE(meshd%ccenters(ncells, 3), source=0.0d0)
+    ALLOCATE(mesh%ccenters(ncells, 3), source=0.0d0)
     ALLOCATE(mesh%cellsizes(ncells, 3))
 ! 计算每个面的面积向量和几何中心
     DO f=1,nfaces
@@ -5390,7 +5412,7 @@ CONTAINS
 &   startlinee
     INTEGER(kind=8) :: bnameline, bnfacesline, bstartfaceline, pos
     CHARACTER(len=256), ALLOCATABLE :: blines(:)
-    CHARACTER(len=256) :: linestr, dummy
+    CHARACTER(len=256) :: linestr, dummy, intstr
     INTRINSIC ADJUSTL
     INTRINSIC TRIM
     INTRINSIC INDEX
@@ -5430,12 +5452,17 @@ CONTAINS
               boundarynames(i) = TRIM(ADJUSTL(blines(bnameline)))
               CALL FINDINLINES('nFaces', blines, startline, bnfacesline)
               pos = INDEX(blines(bnfacesline), 'nFaces') + 6
-              READ(blines(bnfacesline)(pos:), *) boundarynumfaces(i)
+              intstr = ADJUSTL(blines(bnfacesline)(pos:))
+              pos = INDEX(intstr, ';')
+              IF (pos .GT. 0) intstr(pos:) = ' '
+              READ(intstr, *) boundarynumfaces(i)
               CALL FINDINLINES('startFace', blines, startline, &
 &                        bstartfaceline)
               pos = INDEX(blines(bstartfaceline), 'startFace') + 9
-              READ(blines(bstartfaceline), *) dummy, boundarystartfaces(&
-&            i)
+              intstr = ADJUSTL(blines(bstartfaceline)(pos:))
+              pos = INDEX(intstr, ';')
+              IF (pos .GT. 0) intstr(pos:) = ' '
+              READ(intstr, *) boundarystartfaces(i)
               boundarystartfaces(i) = boundarystartfaces(i) + 1
 !boundaryEndFaces(i) = boundaryStartFaces(i) + boundaryNumFaces(i) - 1
               CALL FINDINLINES('}', blines, startline, startlinee)
@@ -7381,7 +7408,7 @@ CONTAINS
     INTRINSIC SIZE
     INTRINSIC MIN
     INTRINSIC NEW_LINE
-    targetcfld = 0.0d0!dtd(1)
+    targetcfld = dtd(1)
     targetcfl = dt(1)
     PRINT*, 'targetCFL ', targetcfl
     PRINT*, 'targetCFLd ', targetcfld
@@ -7651,6 +7678,7 @@ CONTAINS
     INTEGER(kind=8), SAVE :: stat=0
     REAL(kind=8) :: coeff, timeflux, mag_val
     REAL(kind=8) :: timefluxd, mag_vald
+    REAL(kind=8), PARAMETER :: area_eps=1.0d-30
     REAL(kind=8), ALLOCATABLE :: timefluxes(:), surfaceareas(:)
     REAL(kind=8), ALLOCATABLE :: timefluxesd(:), surfaceareasd(:)
     INTRINSIC PRESENT
@@ -7706,16 +7734,23 @@ CONTAINS
 &       timefluxd
       timefluxes(neighbourcell) = timefluxes(neighbourcell) + timeflux
     END DO
-! 应用扩散系数并归一化
-    timefluxesd = coeff*timefluxesd/surfaceareas-coeff*timefluxes*surfaceareasd/&
-&     (surfaceareas*surfaceareas)
-    timefluxes = timefluxes*(coeff/surfaceareas)
+! 应用扩散系数并归一化（避免 surfaceareas 过小导致数值放大）
+    DO i=1,ncells
+      IF (surfaceareas(i) .GT. area_eps) THEN
+        timefluxesd(i) = coeff*timefluxesd(i)/surfaceareas(i) - coeff*&
+&         timefluxes(i)*surfaceareasd(i)/(surfaceareas(i)*surfaceareas(i))
+        timefluxes(i) = timefluxes(i)*(coeff/surfaceareas(i))
+      ELSE
+        timefluxesd(i) = 0.0_8
+        timefluxes(i) = 0.0d0
+      END IF
+    END DO
 ! 确保只应用平滑（不增加时间步长）
     DO i=1,ncells
       IF (0.0d0 .GT. timefluxes(i)) THEN
         timefluxes(i) = timefluxes(i)
       ELSE
-!        timefluxesd(i) = 0.0_8
+        timefluxesd(i) = 0.0_8
         timefluxes(i) = 0.0d0
       END IF
     END DO
@@ -7813,6 +7848,7 @@ CONTAINS
     INTEGER(kind=8), SAVE :: stat=0
     REAL(kind=8) :: coeff, timeflux, mag_val
     REAL(kind=8) :: timefluxd, mag_vald
+    REAL(kind=8), PARAMETER :: area_eps=1.0d-30
     REAL(kind=8), ALLOCATABLE :: timefluxes(:), surfaceareas(:)
     REAL(kind=8), ALLOCATABLE :: timefluxesd(:), surfaceareasd(:)
     INTRINSIC PRESENT
@@ -7868,16 +7904,23 @@ CONTAINS
 &       timefluxd
       timefluxes(neighbourcell) = timefluxes(neighbourcell) + timeflux
     END DO
-! 应用扩散系数并归一化
-    timefluxesd = coeff*(timefluxesd-timefluxes*surfaceareasd/&
-&     surfaceareas)/surfaceareas
-    timefluxes = timefluxes*(coeff/surfaceareas)
+! 应用扩散系数并归一化（避免 surfaceareas 过小导致数值放大）
+    DO i=1,ncells
+      IF (surfaceareas(i) .GT. area_eps) THEN
+        timefluxesd(i) = coeff*(timefluxesd(i)-timefluxes(i)*surfaceareasd(i)/&
+&         surfaceareas(i))/surfaceareas(i)
+        timefluxes(i) = timefluxes(i)*(coeff/surfaceareas(i))
+      ELSE
+        timefluxesd(i) = 0.0_8
+        timefluxes(i) = 0.0d0
+      END IF
+    END DO
 ! 确保只应用平滑（不增加时间步长）
     DO i=1,ncells
       IF (0.0d0 .GT. timefluxes(i)) THEN
         timefluxes(i) = timefluxes(i)
       ELSE
-!        timefluxesd(i) = 0.0_8
+        timefluxesd(i) = 0.0_8
         timefluxes(i) = 0.0d0
       END IF
     END DO
@@ -8361,4 +8404,3 @@ CONTAINS
   END SUBROUTINE COMPUTE_CFD
 
 END MODULE BUFLOWMODULE_DIFF
-
