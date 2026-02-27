@@ -131,8 +131,8 @@ CONTAINS
       IF (ALLOCATED(wing)) THEN
         DEALLOCATE(wing)
       END IF
-      ALLOCATE(point_updated(18513, 3))
-      ALLOCATE(point_update(18513, 3))
+      IF (ALLOCATED(point_updated)) DEALLOCATE(point_updated)
+      IF (ALLOCATED(point_update)) DEALLOCATE(point_update)
       PRINT*, "========================================"
       PRINT*, "输出wing_update的第一个点:"
       PRINT*, "wing_update(1,1) = ", wing_update(1,1)
@@ -285,7 +285,7 @@ CONTAINS
       IF (ALLOCATED(wing)) THEN
         DEALLOCATE(wing)
       END IF
-      ALLOCATE(point_update(18513, 3))
+      IF (ALLOCATED(point_update)) DEALLOCATE(point_update)
       CALL MESHDEFORMATION(wing_update, point_update)
       IF (ALLOCATED(wing_update)) THEN
         DEALLOCATE(wing_update)
@@ -382,6 +382,18 @@ CONTAINS
 ! 空数组初始化
     points = READOFPOINTSFILEF(pointsfilepath)
     npoints = SIZE(points, 1)
+    IF (ALLOCATED(point_update)) THEN
+      IF (SIZE(point_update, 1) .NE. npoints .OR. SIZE(point_update, 2) .NE. 3) THEN
+        DEALLOCATE(point_update)
+      END IF
+    END IF
+    IF (.NOT.ALLOCATED(point_update)) ALLOCATE(point_update(npoints, 3), source=0.0d0)
+    IF (ALLOCATED(point_updated)) THEN
+      IF (SIZE(point_updated, 1) .NE. npoints .OR. SIZE(point_updated, 2) .NE. 3) THEN
+        DEALLOCATE(point_updated)
+      END IF
+    END IF
+    IF (.NOT.ALLOCATED(point_updated)) ALLOCATE(point_updated(npoints, 3), source=0.0d0)
     IF (.NOT.ALLOCATED(wing)) THEN
       ALLOCATE(wing(99, 2), source=0.0_real64)
     END IF
@@ -645,6 +657,12 @@ CONTAINS
 ! 空数组初始化
     points = READOFPOINTSFILEF(pointsfilepath)
     npoints = SIZE(points, 1)
+    IF (ALLOCATED(point_update)) THEN
+      IF (SIZE(point_update, 1) .NE. npoints .OR. SIZE(point_update, 2) .NE. 3) THEN
+        DEALLOCATE(point_update)
+      END IF
+    END IF
+    IF (.NOT.ALLOCATED(point_update)) ALLOCATE(point_update(npoints, 3), source=0.0d0)
     IF (.NOT.ALLOCATED(wing)) THEN
       ALLOCATE(wing(99, 2), source=0.0_real64)
     END IF

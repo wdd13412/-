@@ -14,6 +14,13 @@ program RUN_MAIN_NODIFF
     ! 调用main子程序（此时编译器已知晓其接口，支持可分配数组参数）
     call MAIN_D(input_param, input_paramd, cellprimitivesout, cellprimitivesoutd)
 
+
+    if (allocated(cellprimitivesoutd)) then
+        print *, "AD dField sample cell 2210:", &
+     &      cellprimitivesoutd(2210,1), cellprimitivesoutd(2210,2), &
+     &      cellprimitivesoutd(2210,3), cellprimitivesoutd(2210,4), &
+     &      cellprimitivesoutd(2210,5)
+    end if
     ! 输出结果信息（可选）
     if (allocated(cellprimitivesout)) then
         deallocate(cellprimitivesout)  ! 释放内存
