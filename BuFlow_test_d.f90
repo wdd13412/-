@@ -9991,12 +9991,15 @@ CONTAINS
     SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA(ncells)
       IMPLICIT NONE
       INTEGER(kind=8), INTENT(IN) :: ncells
-      INTEGER(kind=8) :: i, pd
-      REAL(kind=8) :: epsd
+      INTEGER(kind=8) :: i, f, p, pd, ownercell, neighbourcell
+      REAL(kind=8) :: epsd, area_face, dist_on
       REAL(kind=8) :: Auu4(4,4)
       LOGICAL :: ok4
+      REAL(kind=8), ALLOCATABLE :: sp_lap_diag(:), sp_lap_off(:)
 
       epsd = MAX(1.0d-30, pc_pschur_diag_eps)
+
+      ! ---- U-block inverse used by split Schur (velocity block approx inverse) ----
       IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
       ALLOCATE(pc_duu_inv(ncells,4,4))
       pc_duu_inv = 0.0_8
@@ -10030,6 +10033,50 @@ CONTAINS
           pc_duu_inv(i,4,4) = 1.0_8 / MAX(ABS(Auu4(4,4)), epsd)
         END IF
       END DO
+
+      ! ---- Explicit pressure Laplacian (face geometry) replaces algebraic Sp ----
+      ALLOCATE(sp_lap_diag(ncells), sp_lap_off(SIZE(pc_col_ind)))
+      sp_lap_diag = 0.0_8
+      sp_lap_off = 0.0_8
+
+      IF (.NOT. ALLOCATED(faces_mesh) .OR. .NOT. ALLOCATED(favecs_mesh) .OR. .NOT. ALLOCATED(ccenters_mesh)) THEN
+        ! fallback to algebraic Schur if geometry unavailable
+        DO i = 1_8, ncells
+          sp_lap_diag(i) = MAX(epsd, ABS(pc_sp_diag(i)))
+        END DO
+      ELSE
+        DO f = 1_8, SIZE(faces_mesh,1)
+          ownercell = faces_mesh(f,1)
+          neighbourcell = faces_mesh(f,2)
+          IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
+          IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
+
+          area_face = SQRT(favecs_mesh(f,1)**2 + favecs_mesh(f,2)**2 + favecs_mesh(f,3)**2)
+          dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
+          &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
+          &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
+          dist_on = MAX(dist_on, 1.0d-12)
+          p = area_face / dist_on
+          IF (p <= 0.0_8) CYCLE
+
+          sp_lap_diag(ownercell) = sp_lap_diag(ownercell) + p
+          sp_lap_diag(neighbourcell) = sp_lap_diag(neighbourcell) + p
+
+          pd = FIND_BLOCK_POS(ownercell, neighbourcell)
+          IF (pd > 0_8) sp_lap_off(pd) = sp_lap_off(pd) - p
+          pd = FIND_BLOCK_POS(neighbourcell, ownercell)
+          IF (pd > 0_8) sp_lap_off(pd) = sp_lap_off(pd) - p
+        END DO
+        DO i = 1_8, ncells
+          sp_lap_diag(i) = MAX(sp_lap_diag(i), epsd)
+        END DO
+      END IF
+
+      pc_sp_diag = sp_lap_diag
+      pc_sp_off = sp_lap_off
+      pc_sp_ready = .TRUE.
+      DEALLOCATE(sp_lap_diag, sp_lap_off)
+
       PRINT *, '[PC-SCHUR] split data ready.'
     END SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA
     SUBROUTINE PC_APPLY_SCHUR_SPLIT(ncells, rhs_in, z_out)
