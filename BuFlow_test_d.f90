@@ -169,7 +169,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_mass_auto_beta = 0.08d0
   REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
-  LOGICAL, SAVE :: pc_use_pressure_laplace_reg = .TRUE.
+  LOGICAL, SAVE :: pc_use_pressure_laplace_reg = .FALSE.
   REAL(kind=8), SAVE :: pc_press_laplace_beta = 0.01d0
   ! ===== AM^{-1} polynomial defect-correction =====
   LOGICAL, SAVE :: pc_use_am1 = .TRUE.
