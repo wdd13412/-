@@ -8715,6 +8715,7 @@ CONTAINS
 		  pc_blk(p,:,:) = pc_blk(p,:,:) + mass_coeff * J5
 		END DO
 	  END IF
+      IF (pc_use_coarse_pv_schur) pc_use_two_level = .TRUE.
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
 	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am_poly=', pc_use_am_poly, &
 	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level, &
