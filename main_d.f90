@@ -4,9 +4,8 @@
 MODULE MAIN_MODULE_DIFF
   USE BUFLOWMODULE_DIFF
   USE MESHDEFORMATIONN_DIFF
-  use PETSC_KSP_WRAPPER
-!!!!!!!!!!      
-!!!!!!!!!!	 
+!!!!!!!!!!
+!!!!!!!!!!
   IMPLICIT NONE
 
 CONTAINS
@@ -332,8 +331,8 @@ CONTAINS
 								n = ncells*5
 								ALLOCATE(b_i(n), x_tan(n), dwdx(n, 5), rhs_rho(ncells, 5))
 								tol = 1.0d-8!tol = 1.0d-8
-								maxiter = 10
-								m_restart = 50!80,提高能提高收敛速度（试过提高200，过多会增加内存负担，影响运行速度。没验证过过高是否反而下降）
+								maxiter = 20
+								m_restart = 200! 放大Krylov子空间，弱化restart导致的信息丢失
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8
 								CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)   ! 先建一次，保证本轮开着
@@ -352,7 +351,7 @@ CONTAINS
 								  x_tan = 0.0_8
 
 								  !无雅可比矩阵GMRES方法(正向自动微分求解矩阵向量积)求解dw/dx
-								  CALL SOLVE_TANGENT_PETSC(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+								  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
 								  !x_tan表示的是一个变形参数的dw/dx,维度为（ncells*5）,dwdx表示的是四个变形参数的dw/dx，维度为（ncells*5，4）
 								  dwdx(1:n, i_param) = x_tan
 								  PRINT *, 'Tangent param ', i_param, ' GMRES info=', info
@@ -985,4 +984,3 @@ CONTAINS
   END FUNCTION ISNUMBERRR
 
 END MODULE MAIN_MODULE_DIFF
-

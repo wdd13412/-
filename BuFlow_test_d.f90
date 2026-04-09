@@ -134,11 +134,11 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_equil = .TRUE.          ! 块缩放
   LOGICAL, SAVE :: pc_use_offdiag_drop = .TRUE.   ! 非对角门限裁剪
   INTEGER(kind=8), SAVE :: pc_equil_iters = 2_8   ! Ruiz迭代次数(1~3)
-  REAL(kind=8), SAVE :: pc_drop_rel = 1.0d-3 !1.0d-3      ! 非对角相对阈值
+  REAL(kind=8), SAVE :: pc_drop_rel = 1.0d-4 ! 更保守删减，保留更多耦合
   REAL(kind=8), SAVE :: pc_offdiag_cap = 5.0d0    ! 非对角块范数上限倍数(相对对角)
   REAL(kind=8), SAVE :: pc_diag_eps = 1.0d-10     ! 你已有类似项可复用
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_eqL(:), pc_eqR(:)  ! 每cell缩放
-  INTEGER(kind=8), SAVE :: pc_keep_topk = 6_8      ! 每行至少保留的强非对角块数
+  INTEGER(kind=8), SAVE :: pc_keep_topk = 10_8      ! 每行至少保留的强非对角块数
   LOGICAL, SAVE :: pc_use_ilut_lite = .FALSE.
   INTEGER(kind=8), SAVE :: pc_ilut_extra_per_row = 2_8
   REAL(kind=8), SAVE :: pc_ilut_drop_rel = 1.0d-3
@@ -155,17 +155,23 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_nc = 0_8
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_agg_id(:)      ! size ncells, 1..pc_nagg
   ! ===== ILU ordering: RCM (apply in factor/solve traversal) =====
-  LOGICAL, SAVE :: pc_use_rcm_order = .FALSE.
+  LOGICAL, SAVE :: pc_use_rcm_order = .TRUE.
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:), pc_iperm(:)
-  LOGICAL, SAVE :: pc_use_targeted_boost = .FALSE.
+  LOGICAL, SAVE :: pc_use_targeted_boost = .TRUE.
   LOGICAL, SAVE :: pc_use_pschur = .TRUE.
-	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 2_8
+	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 4_8
 	REAL(kind=8), SAVE :: pc_pschur_diag_eps = 1.0d-10
+  ! ===== AINV-like 后平滑：M^{-1} <- M_ILU^{-1} + ω D^{-1}(I-A0 M_ILU^{-1}) =====
+  LOGICAL, SAVE :: pc_use_ainv_refine = .TRUE.
+  INTEGER(kind=8), SAVE :: pc_ainv_sweeps = 2_8
+  REAL(kind=8), SAVE :: pc_ainv_omega = 0.8_8
 
 	! 压力Schur近似：标量稀疏（沿用cell邻接图）
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_off(:)       ! (nnzb) 仅邻接项，含对角位可复用
 	LOGICAL, SAVE :: pc_sp_ready = .FALSE.
+  ! RHS阶段点坐标导数快照（避免后续matvec重置后丢失）
+  REAL(kind=8), ALLOCATABLE, SAVE :: point_updated_rhs(:, :)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 CONTAINS
@@ -454,7 +460,7 @@ CONTAINS
 ! 已知初始时间步
     initdt = 0.0000001
 !36.5       ! 已知总仿真时间!!!!!
-    endtime = 800
+    endtime = 600
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -4906,11 +4912,17 @@ CONTAINS
           bnfacesline = FINDINLINES('nFaces', blines, startline)
           pos = INDEX(blines(bnfacesline), 'nFaces') + 6
           PRINT*, 'A1'
-          READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
+          linestr = ADJUSTL(blines(bnfacesline)(pos:))
+          bstartfaceline = INDEX(linestr, ';')
+          IF (bstartfaceline > 0) linestr = linestr(:bstartfaceline-1)
+          READ(linestr, *) boundarynumfacess(i)
           PRINT*, 'A2'
           bstartfaceline = FINDINLINES('startFace', blines, startline)
           pos = INDEX(blines(bstartfaceline), 'startFace') + 9
-          READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
+          linestr = ADJUSTL(blines(bstartfaceline)(pos:))
+          bnameline = INDEX(linestr, ';')
+          IF (bnameline > 0) linestr = linestr(:bnameline-1)
+          READ(linestr, *) boundarystartfacess(i)
           boundarystartfacess(i) = boundarystartfacess(i) + 1
 !boundaryEndFaces(i) = boundaryStartFacess(i) + boundaryNumFacess(i) - 1
           startline = FINDINLINES('}', blines, startline) + 1
@@ -7990,7 +8002,8 @@ CONTAINS
 		END SUBROUTINE DGELS
 	  END INTERFACE
 
-	  REAL(kind=8), ALLOCATABLE :: r(:), v(:, :), w(:), h(:, :), y(:), z(:), tmp(:)
+	  REAL(kind=8), ALLOCATABLE :: r(:), v(:, :), w(:), h(:, :), y(:), z(:), tmp(:), x_old(:)
+	  REAL(kind=8), ALLOCATABLE :: u_rec(:, :), c_rec(:, :), rec_coeff(:)
 	  REAL(kind=8) :: bnrm, rnrm_true, tol_b, beta_kry, res_ls, &
   xnrm_old, xnrm_new, znrm, rcheck, v1norm
       REAL(kind=8) :: eta_k, eta_prev, tol_b_k, phi_exp
@@ -8004,6 +8017,12 @@ CONTAINS
 	  REAL(kind=8) :: delta_w_norm, r_old_norm
 	  REAL(kind=8) :: Hy_norm, hy_i
 	  REAL(kind=8) :: v1_norm_dbg, Av1_norm_dbg, h11_dbg, h21_dbg, dot12_dbg, v2_norm_dbg
+	  REAL(kind=8) :: theta_bt, rnrm_bt
+	  REAL(kind=8) :: gamma_rec, cnrm_rec, base_cnrm
+	  INTEGER(kind=8) :: bt
+	  INTEGER(kind=8) :: a, n_aug
+	  LOGICAL :: bt_ok
+	  INTEGER(kind=8), PARAMETER :: max_aug = 4_8
 
 	  INTRINSIC SQRT, ABS, SUM, MIN
 
@@ -8017,7 +8036,11 @@ CONTAINS
 	  END IF
 
 	  ALLOCATE(r(n), v(n, m_restart+1), w(n), h(m_restart+1, m_restart), &
-	&          y(m_restart), z(n), tmp(n))
+&          y(m_restart), z(n), tmp(n), x_old(n), u_rec(n, max_aug), c_rec(n, max_aug), rec_coeff(max_aug))
+	  u_rec = 0.0_8
+	  c_rec = 0.0_8
+	  rec_coeff = 0.0_8
+	  n_aug = 0_8
 
 	  ! ---------- 初始真殘差 r = b - A*x ----------
 	  bnrm = SQRT(SUM(b*b))
@@ -8081,7 +8104,7 @@ CONTAINS
 
 	  IF (rnrm_true <= tol_b) THEN
 		info = 0
-		DEALLOCATE(r, v, w, h, y, z, tmp)
+			  DEALLOCATE(r, v, w, h, y, z, tmp, x_old, u_rec, c_rec, rec_coeff)
 		RETURN
 	  END IF
 
@@ -8101,6 +8124,18 @@ CONTAINS
 		END IF
 		tol_b_k = eta_k * bnrm
 
+		! ===== 回收子空间投影（GCRO/LGMRES风格简化）：先做 r <- (I-CC^T)r，并修正 x =====
+		IF (n_aug > 0_8) THEN
+		  DO a = 1_8, n_aug
+		    rec_coeff(a) = DOT_PRODUCT(c_rec(1:n, a), r(1:n))
+		  END DO
+		  DO a = 1_8, n_aug
+		    x(1:n) = x(1:n) + rec_coeff(a) * u_rec(1:n, a)
+		    r(1:n) = r(1:n) - rec_coeff(a) * c_rec(1:n, a)
+		  END DO
+		  rnrm_true = SQRT(SUM(r*r))
+		  PRINT *, '[GMRES-REC] outer=', k, ' n_aug=', n_aug, ' projected true||r||/||b||=', rnrm_true/bnrm
+		END IF
 		! 本輪 Krylov 的起始：beta = ||r||，v1 = r/||r||
 		beta_kry = rnrm_true
 		PRINT *, '[GMRES-DBG] outer=', k, &
@@ -8276,6 +8311,25 @@ CONTAINS
 
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||A*delta_x||=', delta_w_norm, &
 		&         ' ||r_old||=', r_old_norm, ' ratio=', delta_w_norm/ MAX(1.0d-300, r_old_norm)
+		! ===== 从当前校正方向提取回收基（A-正交）=====
+		base_cnrm = MAX(1.0d-300, delta_w_norm)
+		DO a = 1_8, n_aug
+		  gamma_rec = DOT_PRODUCT(c_rec(1:n, a), w(1:n))
+		  w(1:n) = w(1:n) - gamma_rec * c_rec(1:n, a)
+		  z(1:n) = z(1:n) - gamma_rec * u_rec(1:n, a)
+		END DO
+		cnrm_rec = SQRT(SUM(w*w))
+		IF (cnrm_rec > 1.0d-10 * base_cnrm) THEN
+		  IF (n_aug < max_aug) THEN
+		    n_aug = n_aug + 1_8
+		  ELSE
+		    u_rec(1:n, 1:max_aug-1) = u_rec(1:n, 2:max_aug)
+		    c_rec(1:n, 1:max_aug-1) = c_rec(1:n, 2:max_aug)
+		  END IF
+		  u_rec(1:n, n_aug) = z(1:n) / cnrm_rec
+		  c_rec(1:n, n_aug) = w(1:n) / cnrm_rec
+		END IF
+		x_old(1:n) = x(1:n)
 		x(1:n) = x(1:n) + z(1:n)
 		xnrm_new = SQRT(SUM(x(1:n)*x(1:n)))
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||x_new||=', xnrm_new
@@ -8287,6 +8341,28 @@ CONTAINS
 		!!!!!
 		r = b - w
 		rnrm_true = SQRT(SUM(r*r))
+		IF (rnrm_true > beta_kry) THEN
+		  bt_ok = .FALSE.
+		  theta_bt = 0.5_8
+		  DO bt = 1_8, 4_8
+		    x(1:n) = x_old(1:n) + theta_bt * z(1:n)
+		    CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x, w)
+		    r = b - w
+		    rnrm_bt = SQRT(SUM(r*r))
+		    IF (rnrm_bt < rnrm_true) THEN
+		      rnrm_true = rnrm_bt
+		      bt_ok = .TRUE.
+		    END IF
+		    IF (rnrm_true <= beta_kry) EXIT
+		    theta_bt = 0.5_8 * theta_bt
+		  END DO
+		  IF (.NOT. bt_ok) THEN
+		    x(1:n) = x_old(1:n)
+		    CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x, w)
+		    r = b - w
+		    rnrm_true = SQRT(SUM(r*r))
+		  END IF
+		END IF
 		PRINT *, '  [GMRES] outer=', k, ' true||r||=', rnrm_true, &
 &      ' true||r||/||b||=', rnrm_true/bnrm, ' eta_k=', eta_k, &
 &      ' converged=', (rnrm_true <= tol_b)
@@ -8316,7 +8392,7 @@ CONTAINS
 		info = 1
 	  END IF
 
-	  DEALLOCATE(r, v, w, h, y, z, tmp)
+	  DEALLOCATE(r, v, w, h, y, z, tmp, x_old, u_rec, c_rec, rec_coeff)
 
 	END SUBROUTINE SOLVE_TANGENT_JFGMRES
   SUBROUTINE OUTPUT_WALL_CP_CSV(meshpath, point_update, cellprimitives, &
@@ -8681,6 +8757,7 @@ CONTAINS
 	  ALLOCATE(pc_a0_blk(SIZE(pc_blk,1), 5, 5))
 	  pc_a0_blk = pc_blk
 	  pc_a0_ready = .TRUE.
+	  CALL PC_BUILD_BLOCK_DIAG_INV(ncells)
 	  PRINT *, '[PC-A0] backup ready, nnzb=', SIZE(pc_a0_blk,1) 
 	  CALL FACTOR_BLOCK_ILU0(ncells, ok)
 	    IF (.NOT. ok) THEN
@@ -9354,6 +9431,60 @@ CONTAINS
 		END DO
 	  END DO
 	END SUBROUTINE PC_APPLY_A0
+	SUBROUTINE PC_BUILD_BLOCK_DIAG_INV(ncells)
+	  IMPLICIT NONE
+	  INTEGER(kind=8), INTENT(IN) :: ncells
+	  INTEGER(kind=8) :: c, p
+	  LOGICAL :: ok5
+	  REAL(kind=8) :: A55(5,5), Ainv55(5,5)
+
+	  IF (.NOT. pc_a0_ready) RETURN
+	  IF (.NOT. ALLOCATED(pc_diag_pos) .OR. .NOT. ALLOCATED(pc_a0_blk)) RETURN
+
+	  IF (ALLOCATED(pc_diag_inv)) DEALLOCATE(pc_diag_inv)
+	  ALLOCATE(pc_diag_inv(ncells,5,5))
+	  pc_diag_inv = 0.0_8
+
+	  DO c = 1_8, ncells
+		p = pc_diag_pos(c)
+		IF (p > 0_8) THEN
+		  A55 = pc_a0_blk(p,:,:)
+		  CALL INVERT_5X5(A55, Ainv55, ok5)
+		  IF (ok5) THEN
+			pc_diag_inv(c,:,:) = Ainv55
+		  ELSE
+			pc_diag_inv(c,1,1) = 1.0_8 / MAX(1.0d-12, ABS(A55(1,1)))
+			pc_diag_inv(c,2,2) = 1.0_8 / MAX(1.0d-12, ABS(A55(2,2)))
+			pc_diag_inv(c,3,3) = 1.0_8 / MAX(1.0d-12, ABS(A55(3,3)))
+			pc_diag_inv(c,4,4) = 1.0_8 / MAX(1.0d-12, ABS(A55(4,4)))
+			pc_diag_inv(c,5,5) = 1.0_8 / MAX(1.0d-12, ABS(A55(5,5)))
+		  END IF
+		ELSE
+		  pc_diag_inv(c,1,1) = 1.0_8
+		  pc_diag_inv(c,2,2) = 1.0_8
+		  pc_diag_inv(c,3,3) = 1.0_8
+		  pc_diag_inv(c,4,4) = 1.0_8
+		  pc_diag_inv(c,5,5) = 1.0_8
+		END IF
+	  END DO
+	END SUBROUTINE PC_BUILD_BLOCK_DIAG_INV
+	SUBROUTINE PC_APPLY_BLOCK_DIAG_INV(ncells, r_in, z_out)
+	  IMPLICIT NONE
+	  INTEGER(kind=8), INTENT(IN) :: ncells
+	  REAL(kind=8), INTENT(IN) :: r_in(:)
+	  REAL(kind=8), INTENT(OUT) :: z_out(:)
+	  INTEGER(kind=8) :: c
+	  REAL(kind=8) :: rhs5(5), z5(5)
+
+	  z_out = 0.0_8
+	  IF (.NOT. ALLOCATED(pc_diag_inv)) RETURN
+
+	  DO c = 1_8, ncells
+		rhs5 = r_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
+		CALL MATVEC5(pc_diag_inv(c,:,:), rhs5, z5)
+		z_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = z5
+	  END DO
+	END SUBROUTINE PC_APPLY_BLOCK_DIAG_INV
 	SUBROUTINE PC_BUILD_AGG_MAP(ncells)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
@@ -9482,6 +9613,9 @@ CONTAINS
 	  REAL(kind=8) :: rhs(5), tmp(5)
 	  REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), ecorr(:)
 	  REAL(kind=8), ALLOCATABLE :: Az2(:), rr2(:), ecorr2(:)
+	  REAL(kind=8), ALLOCATABLE :: work_in(:), work_sol(:)
+	  REAL(kind=8), ALLOCATABLE :: Az3(:), rr3(:), dz3(:)
+	  INTEGER(kind=8) :: it_ref
 	  ncells = SIZE(vec_in) / 5
 
 	  IF (.NOT. pc_ready) THEN
@@ -9498,9 +9632,18 @@ CONTAINS
 		RETURN
 	  END IF
 
-	  ALLOCATE(y(ncells,5))
+	  ALLOCATE(y(ncells,5), work_in(ncells*5), work_sol(ncells*5))
 	  y = 0.0_8
+	  work_in = vec_in
+	  work_sol = 0.0_8
 	  vec_out = 0.0_8
+
+	  ! 若启用了 Ruiz 左右缩放：预条件内部求解 A~ y = (L r), 最后返回 z = R y
+	  IF (pc_use_equil .AND. ALLOCATED(pc_eqL) .AND. SIZE(pc_eqL) >= ncells) THEN
+	    DO i = 1_8, ncells
+	      work_in((i-1_8)*5+1:(i-1_8)*5+5) = pc_eqL(i) * work_in((i-1_8)*5+1:(i-1_8)*5+5)
+	    END DO
+	  END IF
 
 	  !========================
 	  ! 前代：按 RCM 顺序
@@ -9512,7 +9655,7 @@ CONTAINS
 		  i = ii
 		END IF
 
-		rhs = vec_in((i-1_8)*5+1:(i-1_8)*5+5)
+		rhs = work_in((i-1_8)*5+1:(i-1_8)*5+5)
 
 		ri = i
 		IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
@@ -9562,23 +9705,23 @@ CONTAINS
 		  END IF
 
 		  IF (rj > ri) THEN
-		    CALL MATVEC5(pc_blk(p,:,:), vec_out((j-1_8)*5+1:(j-1_8)*5+5), tmp)
+		    CALL MATVEC5(pc_blk(p,:,:), work_sol((j-1_8)*5+1:(j-1_8)*5+5), tmp)
 		    rhs = rhs - tmp
 		  END IF
 		END DO
 
-		CALL MATVEC5(pc_uinv(i,:,:), rhs, vec_out((i-1_8)*5+1:(i-1_8)*5+5))
+		CALL MATVEC5(pc_uinv(i,:,:), rhs, work_sol((i-1_8)*5+1:(i-1_8)*5+5))
 	  END DO
 	    ! --- pressure Schur-lite correction (after ILU, before coarse) ---
 	  IF (pc_use_pschur .AND. pc_sp_ready) THEN
 		ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
 
-		CALL PC_APPLY_A0(ncells, vec_out, Az)
-		rr = vec_in - Az
+		CALL PC_APPLY_A0(ncells, work_sol, Az)
+		rr = work_in - Az
 
 		ecorr = 0.0_8
 		CALL PC_APPLY_PRESSURE_SCHUR_CORR(ncells, rr, ecorr)
-		vec_out = vec_out + 0.2_8 * ecorr
+		work_sol = work_sol + 0.2_8 * ecorr
 
 		DEALLOCATE(Az, rr, ecorr)
 	  END IF
@@ -9588,16 +9731,36 @@ CONTAINS
 	  IF (pc_use_two_level .AND. pc_coarse_ready) THEN
 		ALLOCATE(Az2(ncells*5), rr2(ncells*5), ecorr2(ncells*5))
 
-		CALL PC_APPLY_A0(ncells, vec_out, Az2)
-		rr2 = vec_in - Az2
+		CALL PC_APPLY_A0(ncells, work_sol, Az2)
+		rr2 = work_in - Az2
 
 		CALL PC_COARSE_CORRECT_AGG(ncells, rr2, ecorr2)
-		vec_out = vec_out + ecorr2
+		work_sol = work_sol + ecorr2
 
 		DEALLOCATE(Az2, rr2, ecorr2)
 	  END IF
+	  !========================
+	  ! AINV-like 后平滑（对 A0 做若干次 D^{-1} 缺陷修正）
+	  !========================
+	  IF (pc_use_ainv_refine .AND. pc_a0_ready .AND. ALLOCATED(pc_diag_inv)) THEN
+		ALLOCATE(Az3(ncells*5), rr3(ncells*5), dz3(ncells*5))
+		DO it_ref = 1_8, MAX(1_8, pc_ainv_sweeps)
+		  CALL PC_APPLY_A0(ncells, work_sol, Az3)
+		  rr3 = work_in - Az3
+		  CALL PC_APPLY_BLOCK_DIAG_INV(ncells, rr3, dz3)
+		  work_sol = work_sol + pc_ainv_omega * dz3
+		END DO
+		DEALLOCATE(Az3, rr3, dz3)
+	  END IF
 
-	  DEALLOCATE(y)
+	  vec_out = work_sol
+	  IF (pc_use_equil .AND. ALLOCATED(pc_eqR) .AND. SIZE(pc_eqR) >= ncells) THEN
+	    DO i = 1_8, ncells
+	      vec_out((i-1_8)*5+1:(i-1_8)*5+5) = pc_eqR(i) * vec_out((i-1_8)*5+1:(i-1_8)*5+5)
+	    END DO
+	  END IF
+
+	  DEALLOCATE(y, work_in, work_sol)
 	END SUBROUTINE APPLY_PC_INV
 	
 	INTEGER(kind=8) FUNCTION FIND_BLOCK_POS(irow, jcol)
@@ -10232,4 +10395,3 @@ CONTAINS
     DEALLOCATE(r0, r1, drd, dwdx_zero, w0, w1)
   END SUBROUTINE RESIDUAL_FD_DEFORM_PARAM_VTK
 END MODULE BUFLOWMODULE_DIFF
-
