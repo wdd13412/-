@@ -188,6 +188,8 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_schur_split = .FALSE.
   INTEGER(kind=8), SAVE :: pc_schur_sweeps = 3_8
   REAL(kind=8), SAVE :: pc_schur_omega = 0.65d0
+  INTEGER(kind=8), SAVE :: pc_schur_u_sweeps = 2_8
+  REAL(kind=8), SAVE :: pc_schur_u_omega = 0.80d0
   REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.30d0
   REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_div_basis(:, :)   ! (ncells,3), 低频散度模态基
@@ -10086,10 +10088,11 @@ CONTAINS
       REAL(kind=8), INTENT(OUT) :: z_out(:)
       INTEGER(kind=8) :: i, j, p, it
       REAL(kind=8), ALLOCATABLE :: dp(:), dp_old(:), rp_tilde(:)
-      REAL(kind=8), ALLOCATABLE :: du_pred(:, :)
+      REAL(kind=8), ALLOCATABLE :: du_pred(:, :), rhs_u(:, :)
       REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), dz(:)
-      REAL(kind=8) :: rhs_s, tinyv
-      REAL(kind=8) :: apu(4), aup(4), sum4(4), du4(4)
+      REAL(kind=8) :: rhs_s, tinyv, omg_u
+      REAL(kind=8) :: apu(4), aup(4), sum4(4), du4(4), rhs4(4)
+      REAL(kind=8) :: Auu_ij(4,4)
 
       z_out = 0.0_8
       IF (.NOT. pc_sp_ready) RETURN
@@ -10097,11 +10100,12 @@ CONTAINS
       IF (.NOT. ALLOCATED(pc_duu_inv)) RETURN
 
       tinyv = MAX(1.0d-30, pc_pschur_diag_eps)
-      ALLOCATE(dp(ncells), dp_old(ncells), rp_tilde(ncells), du_pred(ncells,4))
+      ALLOCATE(dp(ncells), dp_old(ncells), rp_tilde(ncells), du_pred(ncells,4), rhs_u(ncells,4))
       dp = 0.0_8
       dp_old = 0.0_8
       rp_tilde = 0.0_8
       du_pred = 0.0_8
+      rhs_u = 0.0_8
 
       DO i = 1_8, ncells
         du4(1) = rhs_in((i-1_8)*5_8 + 2_8)
@@ -10143,7 +10147,12 @@ CONTAINS
         z_out((i-1_8)*5_8 + 1_8) = dp(i)
       END DO
 
+      ! velocity rhs after pressure correction: rhs_u = ru - Aup*dp
       DO i = 1_8, ncells
+        rhs_u(i,1) = rhs_in((i-1_8)*5_8 + 2_8)
+        rhs_u(i,2) = rhs_in((i-1_8)*5_8 + 3_8)
+        rhs_u(i,3) = rhs_in((i-1_8)*5_8 + 4_8)
+        rhs_u(i,4) = rhs_in((i-1_8)*5_8 + 5_8)
         sum4 = 0.0_8
         DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
           j = pc_col_ind(p)
@@ -10155,11 +10164,64 @@ CONTAINS
           END IF
           sum4 = sum4 + aup * dp(j)
         END DO
-        du4 = du_pred(i,:) - MATMUL(pc_duu_inv(i,:,:), sum4)
-        z_out((i-1_8)*5_8 + 2_8) = du4(1)
-        z_out((i-1_8)*5_8 + 3_8) = du4(2)
-        z_out((i-1_8)*5_8 + 4_8) = du4(3)
-        z_out((i-1_8)*5_8 + 5_8) = du4(4)
+        rhs_u(i,:) = rhs_u(i,:) - sum4
+        du_pred(i,:) = MATMUL(pc_duu_inv(i,:,:), rhs_u(i,:))
+      END DO
+
+      ! approximate U^{-1} using block Gauss-Seidel sweeps on U-subsystem
+      omg_u = MIN(1.0_8, MAX(0.10_8, pc_schur_u_omega))
+      DO it = 1_8, MAX(1_8, pc_schur_u_sweeps)
+        DO i = 1_8, ncells
+          rhs4 = rhs_u(i,:)
+          DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+            j = pc_col_ind(p)
+            IF (j < 1_8 .OR. j > ncells) CYCLE
+            IF (j == i) CYCLE
+            IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3); Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
+              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3); Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
+              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3); Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
+              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3); Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
+            ELSE
+              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3); Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
+              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3); Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
+              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3); Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
+              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3); Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
+            END IF
+            rhs4 = rhs4 - MATMUL(Auu_ij, du_pred(j,:))
+          END DO
+          du4 = MATMUL(pc_duu_inv(i,:,:), rhs4)
+          du_pred(i,:) = (1.0_8 - omg_u) * du_pred(i,:) + omg_u * du4
+        END DO
+        DO i = ncells, 1_8, -1_8
+          rhs4 = rhs_u(i,:)
+          DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+            j = pc_col_ind(p)
+            IF (j < 1_8 .OR. j > ncells) CYCLE
+            IF (j == i) CYCLE
+            IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3); Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
+              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3); Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
+              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3); Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
+              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3); Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
+            ELSE
+              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3); Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
+              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3); Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
+              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3); Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
+              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3); Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
+            END IF
+            rhs4 = rhs4 - MATMUL(Auu_ij, du_pred(j,:))
+          END DO
+          du4 = MATMUL(pc_duu_inv(i,:,:), rhs4)
+          du_pred(i,:) = (1.0_8 - omg_u) * du_pred(i,:) + omg_u * du4
+        END DO
+      END DO
+
+      DO i = 1_8, ncells
+        z_out((i-1_8)*5_8 + 2_8) = du_pred(i,1)
+        z_out((i-1_8)*5_8 + 3_8) = du_pred(i,2)
+        z_out((i-1_8)*5_8 + 4_8) = du_pred(i,3)
+        z_out((i-1_8)*5_8 + 5_8) = du_pred(i,4)
       END DO
 
       IF (pc_schur_post_ilu > 0.0_8 .AND. pc_a0_ready) THEN
@@ -10171,7 +10233,7 @@ CONTAINS
         DEALLOCATE(Az, rr, dz)
       END IF
 
-      DEALLOCATE(dp, dp_old, rp_tilde, du_pred)
+      DEALLOCATE(dp, dp_old, rp_tilde, du_pred, rhs_u)
     END SUBROUTINE PC_APPLY_SCHUR_SPLIT
 SUBROUTINE PC_APPLY_ILU_CORE(vec_in, vec_out)
   IMPLICIT NONE
