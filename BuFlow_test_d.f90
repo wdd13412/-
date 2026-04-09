@@ -180,6 +180,9 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_two_level_presmooth = 1_8
   INTEGER(kind=8), SAVE :: pc_two_level_postsmooth = 1_8
   REAL(kind=8), SAVE :: pc_two_level_omega = 0.85d0
+  LOGICAL, SAVE :: pc_use_coarse_pv_schur = .TRUE.
+  REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
+  REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac_p(:,:), pc_Ac_p_inv(:,:)
   ! ===== Gershgorin-like diagonal dominance stabilization =====
   LOGICAL, SAVE :: pc_use_gersh_shift = .FALSE.
   REAL(kind=8), SAVE :: pc_gersh_theta = 0.95d0
@@ -8714,7 +8717,8 @@ CONTAINS
 	  END IF
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
 	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am_poly=', pc_use_am_poly, &
-	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level
+	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level, &
+    &         ' coarse_pv_schur=', pc_use_coarse_pv_schur
         ! 0) 先保留你已有的对角小正则
 	  !    pc_blk(p,k,k) += 1.0d-10  (已有)
 
@@ -9592,6 +9596,10 @@ CONTAINS
 
 	  pc_coarse_ready = .FALSE.
 	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+      IF (pc_use_coarse_pv_schur) THEN
+        CALL PC_BUILD_COARSE_PV_SCHUR(ncells)
+        RETURN
+      END IF
 
 	  CALL PC_BUILD_AGG_MAP(ncells)
 	  IF (pc_nc <= 0_8) RETURN
@@ -9649,6 +9657,10 @@ CONTAINS
 	  REAL(kind=8), ALLOCATABLE :: rc(:), ec(:)
 
 	  e_out = 0.0_8
+      IF (pc_use_coarse_pv_schur) THEN
+        CALL PC_COARSE_CORRECT_PV_SCHUR(ncells, r_in, e_out)
+        RETURN
+      END IF
 	  IF (.NOT. pc_coarse_ready) RETURN
 	  IF (.NOT. ALLOCATED(pc_agg_id)) RETURN
 
@@ -9683,6 +9695,191 @@ CONTAINS
 
 	  DEALLOCATE(rc, ec)
 	END SUBROUTINE PC_COARSE_CORRECT_AGG
+    SUBROUTINE PC_BUILD_COARSE_PV_SCHUR(ncells)
+      IMPLICIT NONE
+      INTEGER(kind=8), INTENT(IN) :: ncells
+      INTEGER(kind=8) :: i, j, p, agi, agj, pd, ncoarse
+      REAL(kind=8) :: epsd, diag_mean, tr, app, dotv, offsum, target
+      REAL(kind=8) :: Apu_i(4), Aup_j(4), Auu4(4,4), Auu4_inv(4,4), tmp4(4)
+      REAL(kind=8) :: sij
+      LOGICAL :: ok4, okinv
+      REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:)
+
+      pc_coarse_ready = .FALSE.
+      IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_diag_pos)) RETURN
+
+      CALL PC_BUILD_AGG_MAP(ncells)
+      ncoarse = pc_nagg
+      IF (ncoarse <= 0_8) RETURN
+
+      IF (ALLOCATED(pc_Ac_p)) DEALLOCATE(pc_Ac_p)
+      IF (ALLOCATED(pc_Ac_p_inv)) DEALLOCATE(pc_Ac_p_inv)
+      ALLOCATE(pc_Ac_p(ncoarse, ncoarse), pc_Ac_p_inv(ncoarse, ncoarse))
+      pc_Ac_p = 0.0_8
+      pc_Ac_p_inv = 0.0_8
+      pc_nc = ncoarse
+      epsd = MAX(1.0d-30, pc_pschur_diag_eps)
+
+      IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+        ALLOCATE(Ablk(SIZE(pc_a0_blk,1),5,5))
+        Ablk = pc_a0_blk
+      ELSEIF (ALLOCATED(pc_blk)) THEN
+        ALLOCATE(Ablk(SIZE(pc_blk,1),5,5))
+        Ablk = pc_blk
+      ELSE
+        RETURN
+      END IF
+
+      DO i = 1_8, ncells
+        pd = pc_diag_pos(i)
+        IF (pd <= 0_8) CYCLE
+        agi = pc_agg_id(i)
+        Apu_i(1) = Ablk(pd,1,2)
+        Apu_i(2) = Ablk(pd,1,3)
+        Apu_i(3) = Ablk(pd,1,4)
+        Apu_i(4) = Ablk(pd,1,5)
+
+        Auu4(1,1) = Ablk(pd,2,2); Auu4(1,2) = Ablk(pd,2,3); Auu4(1,3) = Ablk(pd,2,4); Auu4(1,4) = Ablk(pd,2,5)
+        Auu4(2,1) = Ablk(pd,3,2); Auu4(2,2) = Ablk(pd,3,3); Auu4(2,3) = Ablk(pd,3,4); Auu4(2,4) = Ablk(pd,3,5)
+        Auu4(3,1) = Ablk(pd,4,2); Auu4(3,2) = Ablk(pd,4,3); Auu4(3,3) = Ablk(pd,4,4); Auu4(3,4) = Ablk(pd,4,5)
+        Auu4(4,1) = Ablk(pd,5,2); Auu4(4,2) = Ablk(pd,5,3); Auu4(4,3) = Ablk(pd,5,4); Auu4(4,4) = Ablk(pd,5,5)
+        CALL INVERT_DENSE(Auu4, Auu4_inv, ok4)
+        IF (.NOT. ok4) THEN
+          Auu4_inv = 0.0_8
+          Auu4_inv(1,1)=1.0_8/epsd; Auu4_inv(2,2)=1.0_8/epsd
+          Auu4_inv(3,3)=1.0_8/epsd; Auu4_inv(4,4)=1.0_8/epsd
+        END IF
+
+        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+          j = pc_col_ind(p)
+          IF (j < 1_8 .OR. j > ncells) CYCLE
+          agj = pc_agg_id(j)
+          app = Ablk(p,1,1)
+          Aup_j(1) = Ablk(p,2,1)
+          Aup_j(2) = Ablk(p,3,1)
+          Aup_j(3) = Ablk(p,4,1)
+          Aup_j(4) = Ablk(p,5,1)
+          tmp4 = MATMUL(Auu4_inv, Aup_j)
+          dotv = Apu_i(1)*tmp4(1) + Apu_i(2)*tmp4(2) + Apu_i(3)*tmp4(3) + Apu_i(4)*tmp4(4)
+          sij = app - dotv
+          pc_Ac_p(agi, agj) = pc_Ac_p(agi, agj) + sij
+        END DO
+      END DO
+
+      tr = 0.0_8
+      DO agi = 1_8, ncoarse
+        tr = tr + ABS(pc_Ac_p(agi, agi))
+      END DO
+      diag_mean = tr / MAX(1.0_8, REAL(ncoarse, kind=8))
+      IF (diag_mean <= epsd) diag_mean = 1.0_8
+
+      DO agi = 1_8, ncoarse
+        offsum = 0.0_8
+        DO agj = 1_8, ncoarse
+          IF (agj == agi) CYCLE
+          offsum = offsum + ABS(pc_Ac_p(agi, agj))
+        END DO
+        target = 0.85_8 * offsum
+        IF (ABS(pc_Ac_p(agi, agi)) < target) THEN
+          pc_Ac_p(agi, agi) = pc_Ac_p(agi, agi) + (target - ABS(pc_Ac_p(agi, agi)))
+        END IF
+        pc_Ac_p(agi, agi) = pc_Ac_p(agi, agi) + 1.0d-10 * diag_mean
+      END DO
+
+      CALL INVERT_DENSE(pc_Ac_p, pc_Ac_p_inv, okinv)
+      pc_coarse_ready = okinv
+      IF (pc_coarse_ready) THEN
+        PRINT *, '[PC-2L-PSCHUR] coarse ready: nagg=', pc_nagg, ' vel_relax=', pc_coarse_pv_vel_relax
+      ELSE
+        PRINT *, '[PC-2L-PSCHUR] coarse inversion failed, disable coarse correction.'
+      END IF
+
+      IF (ALLOCATED(Ablk)) DEALLOCATE(Ablk)
+    END SUBROUTINE PC_BUILD_COARSE_PV_SCHUR
+    SUBROUTINE PC_COARSE_CORRECT_PV_SCHUR(ncells, r_in, e_out)
+      IMPLICIT NONE
+      INTEGER(kind=8), INTENT(IN) :: ncells
+      REAL(kind=8), INTENT(IN) :: r_in(:)
+      REAL(kind=8), INTENT(OUT) :: e_out(:)
+      INTEGER(kind=8) :: i, agi, agj, pd, ncoarse
+      REAL(kind=8), ALLOCATABLE :: rc(:), ec(:)
+      REAL(kind=8) :: epsd, dp_i
+      REAL(kind=8) :: Auu4(4,4), Auu4_inv(4,4), Aup_i(4), rhs4(4), du4(4)
+      LOGICAL :: ok4
+      REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:)
+
+      e_out = 0.0_8
+      IF (.NOT. pc_coarse_ready) RETURN
+      IF (.NOT. ALLOCATED(pc_agg_id)) RETURN
+      IF (.NOT. ALLOCATED(pc_Ac_p_inv)) RETURN
+
+      ncoarse = pc_nagg
+      IF (ncoarse <= 0_8) RETURN
+      epsd = MAX(1.0d-30, pc_pschur_diag_eps)
+
+      ALLOCATE(rc(ncoarse), ec(ncoarse))
+      rc = 0.0_8
+      ec = 0.0_8
+
+      DO i = 1_8, ncells
+        agi = pc_agg_id(i)
+        rc(agi) = rc(agi) + r_in((i-1_8)*5_8 + 1_8)
+      END DO
+
+      DO agi = 1_8, ncoarse
+        DO agj = 1_8, ncoarse
+          ec(agi) = ec(agi) + pc_Ac_p_inv(agi, agj) * rc(agj)
+        END DO
+      END DO
+
+      DO i = 1_8, ncells
+        agi = pc_agg_id(i)
+        e_out((i-1_8)*5_8 + 1_8) = ec(agi)
+      END DO
+
+      IF (pc_coarse_pv_vel_relax > 0.0_8 .AND. ALLOCATED(pc_diag_pos)) THEN
+        IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+          ALLOCATE(Ablk(SIZE(pc_a0_blk,1),5,5))
+          Ablk = pc_a0_blk
+        ELSEIF (ALLOCATED(pc_blk)) THEN
+          ALLOCATE(Ablk(SIZE(pc_blk,1),5,5))
+          Ablk = pc_blk
+        END IF
+        IF (ALLOCATED(Ablk)) THEN
+          DO i = 1_8, ncells
+            pd = pc_diag_pos(i)
+            IF (pd <= 0_8) CYCLE
+            dp_i = ec(pc_agg_id(i))
+            IF (ABS(dp_i) <= 1.0d-30) CYCLE
+
+            Auu4(1,1) = Ablk(pd,2,2); Auu4(1,2) = Ablk(pd,2,3); Auu4(1,3) = Ablk(pd,2,4); Auu4(1,4) = Ablk(pd,2,5)
+            Auu4(2,1) = Ablk(pd,3,2); Auu4(2,2) = Ablk(pd,3,3); Auu4(2,3) = Ablk(pd,3,4); Auu4(2,4) = Ablk(pd,3,5)
+            Auu4(3,1) = Ablk(pd,4,2); Auu4(3,2) = Ablk(pd,4,3); Auu4(3,3) = Ablk(pd,4,4); Auu4(3,4) = Ablk(pd,4,5)
+            Auu4(4,1) = Ablk(pd,5,2); Auu4(4,2) = Ablk(pd,5,3); Auu4(4,3) = Ablk(pd,5,4); Auu4(4,4) = Ablk(pd,5,5)
+            CALL INVERT_DENSE(Auu4, Auu4_inv, ok4)
+            IF (.NOT. ok4) THEN
+              Auu4_inv = 0.0_8
+              Auu4_inv(1,1)=1.0_8/MAX(ABS(Auu4(1,1)),epsd)
+              Auu4_inv(2,2)=1.0_8/MAX(ABS(Auu4(2,2)),epsd)
+              Auu4_inv(3,3)=1.0_8/MAX(ABS(Auu4(3,3)),epsd)
+              Auu4_inv(4,4)=1.0_8/MAX(ABS(Auu4(4,4)),epsd)
+            END IF
+
+            Aup_i(1) = Ablk(pd,2,1)
+            Aup_i(2) = Ablk(pd,3,1)
+            Aup_i(3) = Ablk(pd,4,1)
+            Aup_i(4) = Ablk(pd,5,1)
+            rhs4 = -dp_i * Aup_i
+            du4 = MATMUL(Auu4_inv, rhs4)
+            e_out((i-1_8)*5_8 + 2_8:(i-1_8)*5_8 + 5_8) = e_out((i-1_8)*5_8 + 2_8:(i-1_8)*5_8 + 5_8) + &
+            & pc_coarse_pv_vel_relax * du4
+          END DO
+          DEALLOCATE(Ablk)
+        END IF
+      END IF
+
+      DEALLOCATE(rc, ec)
+    END SUBROUTINE PC_COARSE_CORRECT_PV_SCHUR
 SUBROUTINE PC_APPLY_ILU_CORE(vec_in, vec_out)
   IMPLICIT NONE
   REAL(kind=8), INTENT(IN)  :: vec_in(:)
