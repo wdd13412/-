@@ -4877,8 +4877,10 @@ CONTAINS
 &   , boundarystartfacess(:)
     INTEGER(kind=8) :: i, nlines, iostat, startline, bcount, file_unit
     INTEGER(kind=8) :: bnameline, bnfacesline, bstartfaceline, pos
+    INTEGER(kind=8) :: parsed_i8
 !        character(len=256), allocatable :: bLines(:)
     CHARACTER(len=256) :: linestr, dummy
+    LOGICAL :: parse_ok
     INTRINSIC ADJUSTL
     INTRINSIC TRIM
     INTRINSIC INDEX
@@ -4916,11 +4918,21 @@ CONTAINS
           bnfacesline = FINDINLINES('nFaces', blines, startline)
           pos = INDEX(blines(bnfacesline), 'nFaces') + 6
           PRINT*, 'A1'
-          READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
+          CALL PARSE_FIRST_INT(blines(bnfacesline)(pos:), parsed_i8, parse_ok)
+          IF (parse_ok) THEN
+            boundarynumfacess(i) = parsed_i8
+          ELSE
+            boundarynumfacess(i) = 0_8
+          END IF
           PRINT*, 'A2'
           bstartfaceline = FINDINLINES('startFace', blines, startline)
           pos = INDEX(blines(bstartfaceline), 'startFace') + 9
-          READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
+          CALL PARSE_FIRST_INT(blines(bstartfaceline)(pos:), parsed_i8, parse_ok)
+          IF (parse_ok) THEN
+            boundarystartfacess(i) = parsed_i8
+          ELSE
+            boundarystartfacess(i) = 0_8
+          END IF
           boundarystartfacess(i) = boundarystartfacess(i) + 1
 !boundaryEndFaces(i) = boundaryStartFacess(i) + boundaryNumFacess(i) - 1
           startline = FINDINLINES('}', blines, startline) + 1
@@ -4994,6 +5006,50 @@ CONTAINS
     READ(str, *, iostat=iostat) num
     IF (iostat .EQ. 0) isnumber = .true.
   END FUNCTION ISNUMBER
+
+  SUBROUTINE PARSE_FIRST_INT(str, ival, ok)
+    IMPLICIT NONE
+    CHARACTER(len=*), INTENT(IN) :: str
+    INTEGER(kind=8), INTENT(OUT) :: ival
+    LOGICAL, INTENT(OUT) :: ok
+    CHARACTER(len=:), ALLOCATABLE :: s
+    INTEGER(kind=8) :: i, j, n, ios
+    INTEGER(kind=8) :: signv
+    CHARACTER(len=64) :: token
+
+    s = ADJUSTL(str)
+    n = LEN_TRIM(s)
+    i = 1_8
+    ok = .FALSE.
+    ival = 0_8
+
+    DO WHILE (i <= n)
+      IF (s(i:i) == '-' .OR. (s(i:i) >= '0' .AND. s(i:i) <= '9')) EXIT
+      i = i + 1_8
+    END DO
+    IF (i > n) RETURN
+
+    signv = 1_8
+    IF (s(i:i) == '-') THEN
+      signv = -1_8
+      i = i + 1_8
+      IF (i > n) RETURN
+    END IF
+
+    IF (.NOT.(s(i:i) >= '0' .AND. s(i:i) <= '9')) RETURN
+    j = i
+    DO WHILE (j <= n)
+      IF (.NOT.(s(j:j) >= '0' .AND. s(j:j) <= '9')) EXIT
+      j = j + 1_8
+    END DO
+
+    token = ' '
+    token(1:(j-i)) = s(i:j-1_8)
+    READ(token(1:(j-i)), *, iostat=ios) ival
+    IF (ios /= 0) RETURN
+    ival = signv * ival
+    ok = .TRUE.
+  END SUBROUTINE PARSE_FIRST_INT
 
 ! 辅助函数：查找包含子串的行
   INTEGER(kind=8) FUNCTION FINDINLINES(substr, lines, startline)
