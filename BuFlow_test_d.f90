@@ -147,7 +147,7 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_drop_comp = .FALSE.
   REAL(kind=8), SAVE :: pc_drop_comp_beta = 0.8d0
     ! ===== two-level coarse correction (5 coarse modes: P,T,Ux,Uy,Uz constants) =====
-  LOGICAL, SAVE :: pc_use_two_level = .FALSE.
+  LOGICAL, SAVE :: pc_use_two_level = .TRUE.
   LOGICAL, SAVE :: pc_coarse_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac(:,:), pc_Ac_inv(:,:)
     ! ===== two-level coarse space: 5 x Nagg =====
