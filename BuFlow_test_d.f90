@@ -164,6 +164,11 @@ MODULE BUFLOWMODULE_DIFF
   ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
   LOGICAL, SAVE :: pc_use_flux_jacobian = .FALSE.
   REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
+  ! ===== variable similarity scaling for PC matrix: A_tilde = D^{-1} A D =====
+  LOGICAL, SAVE :: pc_use_var_scaling = .TRUE.
+  REAL(kind=8), SAVE :: pc_var_scale_p = 1.0d5
+  REAL(kind=8), SAVE :: pc_var_scale_t = 3.0d2
+  REAL(kind=8), SAVE :: pc_var_scale_u = 2.73d2
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
   REAL(kind=8), SAVE :: pc_mass_auto_beta = 0.08d0
@@ -8696,6 +8701,16 @@ CONTAINS
 		END DO
 	  END DO
 
+      ! ---- variable similarity scaling: A_tilde = D^{-1} * A * D ----
+      IF (pc_use_var_scaling) THEN
+        pc_row_scale = (/pc_var_scale_p, pc_var_scale_t, pc_var_scale_u, pc_var_scale_u, pc_var_scale_u/)
+      ELSE
+        pc_row_scale = 1.0_8
+      END IF
+      pc_col_scale = pc_row_scale
+      pc_row_inv = 1.0_8 / MAX(pc_row_scale, 1.0d-30)
+      pc_col_inv = 1.0_8 / MAX(pc_col_scale, 1.0d-30)
+
 	  DO f = 1_8, nfaces - nbdryfaces
 		ownercell = faces_mesh(f,1)
 		neighbourcell = faces_mesh(f,2)
@@ -8747,6 +8762,8 @@ CONTAINS
           Jconv(1,1) = Jconv(1,1) + p_lap
         END IF
 
+        IF (pc_use_var_scaling) Jconv = SPREAD(pc_row_inv,2,5) * Jconv * SPREAD(pc_col_scale,1,5)
+
 		p = pc_diag_pos(ownercell)
 		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
 		p = pc_diag_pos(neighbourcell)
@@ -8781,12 +8798,13 @@ CONTAINS
 		  mass_coeff = MAX(mass_coeff, pc_mass_floor)
 		  w_face(1:5) = cellprimitives(c, 1:5)
 		  CALL BUILD_DUDW_5X5(w_face, fluid, J5)
+          IF (pc_use_var_scaling) J5 = SPREAD(pc_row_inv,2,5) * J5 * SPREAD(pc_col_scale,1,5)
 		  pc_blk(p,:,:) = pc_blk(p,:,:) + mass_coeff * J5
 		END DO
 	  END IF
       IF (pc_use_coarse_pv_schur) pc_use_two_level = .TRUE.
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
-	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' auto_mass=', pc_use_auto_mass_stab, &
+	&         ' var_scaling=', pc_use_var_scaling, ' pseudo_mass=', pc_use_pseudo_time_mass, ' auto_mass=', pc_use_auto_mass_stab, &
     &         ' p_lap=', pc_use_pressure_laplace_reg, ' am_poly=', pc_use_am_poly, &
 	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level, &
     &         ' coarse_pv_schur=', pc_use_coarse_pv_schur, ' schur_split=', pc_use_schur_split
@@ -10401,6 +10419,7 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
 
   INTEGER(kind=8) :: ncells, istep
   REAL(kind=8) :: omega_poly
+  REAL(kind=8), ALLOCATABLE :: vin(:), vout(:)
   REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), ecorr(:)
   REAL(kind=8), ALLOCATABLE :: Az2(:), rr2(:), ecorr2(:)
   REAL(kind=8), ALLOCATABLE :: rr_poly(:), dz(:), Az_poly(:)
@@ -10411,20 +10430,26 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
     RETURN
   END IF
 
+  ALLOCATE(vin(SIZE(vec_in)), vout(SIZE(vec_in)))
+  vin = vec_in
+  IF (pc_use_var_scaling) THEN
+    CALL APPLY_PC_SCALING_SIMILARITY(vin)
+  END IF
+
   IF (pc_use_schur_split .AND. pc_sp_ready .AND. ALLOCATED(pc_duu_inv)) THEN
-    CALL PC_APPLY_SCHUR_SPLIT(ncells, vec_in, vec_out)
+    CALL PC_APPLY_SCHUR_SPLIT(ncells, vin, vout)
   ELSE
-    CALL PC_APPLY_ILU_CORE(vec_in, vec_out)
+    CALL PC_APPLY_ILU_CORE(vin, vout)
   END IF
   ! AM^{-1} polynomial defect-correction (multi-step Richardson on preconditioned residual)
   IF (pc_use_am_poly .AND. pc_a0_ready) THEN
     ALLOCATE(rr_poly(ncells*5), dz(ncells*5), Az_poly(ncells*5))
-    rr_poly = vec_in
-    vec_out = 0.0_8
+    rr_poly = vin
+    vout = 0.0_8
     omega_poly = pc_am_poly_omega0
     DO istep = 1_8, MAX(1_8, pc_am_poly_steps)
       CALL PC_APPLY_ILU_CORE(rr_poly, dz)
-      vec_out = vec_out + omega_poly * dz
+      vout = vout + omega_poly * dz
       CALL PC_APPLY_A0(ncells, dz, Az_poly)
       rr_poly = rr_poly - omega_poly * Az_poly
       omega_poly = MAX(pc_am_poly_omega_min, omega_poly * pc_am_poly_omega_decay)
@@ -10432,26 +10457,60 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
     DEALLOCATE(rr_poly, dz, Az_poly)
   ELSEIF (pc_use_am1 .AND. pc_a0_ready) THEN
     ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
-    CALL PC_APPLY_A0(ncells, vec_out, Az)
-    rr = vec_in - Az
+    CALL PC_APPLY_A0(ncells, vout, Az)
+    rr = vin - Az
     CALL PC_APPLY_ILU_CORE(rr, ecorr)
-    vec_out = vec_out + pc_am1_omega * ecorr
+    vout = vout + pc_am1_omega * ecorr
     DEALLOCATE(Az, rr, ecorr)
   END IF
 
-  IF (.NOT. pc_use_schur_split) CALL PC_APPLY_TWO_LEVEL_MULT(ncells, vec_in, vec_out)
+  IF (.NOT. pc_use_schur_split) CALL PC_APPLY_TWO_LEVEL_MULT(ncells, vin, vout)
 
   IF ((.NOT. pc_use_schur_split) .AND. pc_use_pschur .AND. pc_sp_ready) THEN
     ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
-    CALL PC_APPLY_A0(ncells, vec_out, Az)
-    rr = vec_in - Az
+    CALL PC_APPLY_A0(ncells, vout, Az)
+    rr = vin - Az
     ecorr = 0.0_8
     CALL PC_APPLY_PRESSURE_SCHUR_CORR(ncells, rr, ecorr)
-    vec_out = vec_out + 0.2_8 * ecorr
+    vout = vout + 0.2_8 * ecorr
     DEALLOCATE(Az, rr, ecorr)
   END IF
 
+  vec_out = vout
+  IF (pc_use_var_scaling) THEN
+    CALL APPLY_PC_UNSCALING_SIMILARITY(vec_out)
+  END IF
+  DEALLOCATE(vin, vout)
+
 END SUBROUTINE APPLY_PC_INV
+
+SUBROUTINE APPLY_PC_SCALING_SIMILARITY(vec)
+  IMPLICIT NONE
+  REAL(kind=8), INTENT(INOUT) :: vec(:)
+  INTEGER(kind=8) :: ncells, i, b
+  REAL(kind=8) :: d(5)
+  ncells = SIZE(vec)/5
+  d = (/pc_var_scale_p, pc_var_scale_t, pc_var_scale_u, pc_var_scale_u, pc_var_scale_u/)
+  DO i = 1_8, ncells
+    DO b = 1_8, 5_8
+      vec((i-1_8)*5_8 + b) = vec((i-1_8)*5_8 + b) / MAX(d(b), 1.0d-30)
+    END DO
+  END DO
+END SUBROUTINE APPLY_PC_SCALING_SIMILARITY
+
+SUBROUTINE APPLY_PC_UNSCALING_SIMILARITY(vec)
+  IMPLICIT NONE
+  REAL(kind=8), INTENT(INOUT) :: vec(:)
+  INTEGER(kind=8) :: ncells, i, b
+  REAL(kind=8) :: d(5)
+  ncells = SIZE(vec)/5
+  d = (/pc_var_scale_p, pc_var_scale_t, pc_var_scale_u, pc_var_scale_u, pc_var_scale_u/)
+  DO i = 1_8, ncells
+    DO b = 1_8, 5_8
+      vec((i-1_8)*5_8 + b) = vec((i-1_8)*5_8 + b) * d(b)
+    END DO
+  END DO
+END SUBROUTINE APPLY_PC_UNSCALING_SIMILARITY
 	
 	INTEGER(kind=8) FUNCTION FIND_BLOCK_POS(irow, jcol)
 	  IMPLICIT NONE
