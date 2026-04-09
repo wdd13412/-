@@ -340,13 +340,12 @@ CONTAINS
 !		allocate(points(37254,3), source=0.0_8)  ! 空数组初始化
     points_meshdefor = READOFPOINTSFILEF(pointsfilepath)
     npoints = SIZE(points_meshdefor, 1)
-!        if (.not. allocated(wing)) allocate(wing(99, 2), source=0.0_real64)
-!		if (.not. allocated(inoutput)) allocate(inoutput(99, 2), source=0.0_real64)
     inoutput = CSV_READ('boundary_inoutput_xy.csv')
     wing = CSV_READ('wing.csv')
     nwing = SIZE(wing_update, 1)
     ninoutput = SIZE(inoutput, 1)
-!		allocate(wing_coords(nWing,2), wing_update_coords(nWing,2), inoutput_coords(nInoutput,2))
+    IF (.NOT.ALLOCATED(wing_coords)) ALLOCATE(wing_coords(nwing,2))
+    IF (.NOT.ALLOCATED(inoutput_coords)) ALLOCATE(inoutput_coords(ninoutput,2))
     ALLOCATE(wing_update_coordsd(nwing, 2))
     ALLOCATE(wing_update_coords(nwing, 2))
     wing_coords = wing
@@ -355,7 +354,12 @@ CONTAINS
     wing_update_coords = wing_update
     inoutput_coords = inoutput
     ncontrol = nwing + ninoutput
-!		allocate(control_points(nControl,2))
+    IF (.NOT.ALLOCATED(control_points)) ALLOCATE(control_points(ncontrol,2))
+    IF (.NOT.ALLOCATED(r_row)) ALLOCATE(r_row(ncontrol))
+    IF (.NOT.ALLOCATED(phi_row)) ALLOCATE(phi_row(ncontrol))
+    IF (.NOT.ALLOCATED(phi)) ALLOCATE(phi(ncontrol,ncontrol))
+    IF (.NOT.ALLOCATED(distances)) ALLOCATE(distances(ncontrol))
+    IF (.NOT.ALLOCATED(mat_inv)) ALLOCATE(mat_inv(ncontrol,ncontrol))
     control_points(1:nwing, :) = wing
     control_points(nwing+1:ncontrol, :) = inoutput
     ALLOCATE(d_wing_xd(nwing))
@@ -555,19 +559,23 @@ CONTAINS
 !		allocate(points(37254,3), source=0.0_8)  ! 空数组初始化
     points_meshdefor = READOFPOINTSFILEF(pointsfilepath)
     npoints = SIZE(points_meshdefor, 1)
-!        if (.not. allocated(wing)) allocate(wing(99, 2), source=0.0_real64)
-!		if (.not. allocated(inoutput)) allocate(inoutput(99, 2), source=0.0_real64)
     inoutput = CSV_READ('boundary_inoutput_xy.csv')
     wing = CSV_READ('wing.csv')
     nwing = SIZE(wing_update, 1)
     ninoutput = SIZE(inoutput, 1)
-!		allocate(wing_coords(nWing,2), wing_update_coords(nWing,2), inoutput_coords(nInoutput,2))
+    IF (.NOT.ALLOCATED(wing_coords)) ALLOCATE(wing_coords(nwing,2))
+    IF (.NOT.ALLOCATED(inoutput_coords)) ALLOCATE(inoutput_coords(ninoutput,2))
     ALLOCATE(wing_update_coords(nwing, 2))
     wing_coords = wing
     wing_update_coords = wing_update
     inoutput_coords = inoutput
     ncontrol = nwing + ninoutput
-!		allocate(control_points(nControl,2))
+    IF (.NOT.ALLOCATED(control_points)) ALLOCATE(control_points(ncontrol,2))
+    IF (.NOT.ALLOCATED(r_row)) ALLOCATE(r_row(ncontrol))
+    IF (.NOT.ALLOCATED(phi_row)) ALLOCATE(phi_row(ncontrol))
+    IF (.NOT.ALLOCATED(phi)) ALLOCATE(phi(ncontrol,ncontrol))
+    IF (.NOT.ALLOCATED(distances)) ALLOCATE(distances(ncontrol))
+    IF (.NOT.ALLOCATED(mat_inv)) ALLOCATE(mat_inv(ncontrol,ncontrol))
     control_points(1:nwing, :) = wing
     control_points(nwing+1:ncontrol, :) = inoutput
     ALLOCATE(d_wing_x(nwing))
@@ -916,7 +924,8 @@ CONTAINS
         READ(file_unit, '(a)', iostat=iostat) 
         IF (iostat .NE. 0) THEN
           REWIND(file_unit) 
-!        allocate(lines_defor(nLines))
+          IF (ALLOCATED(lines_defor)) DEALLOCATE(lines_defor)
+          ALLOCATE(lines_defor(nlines))
           DO i=1,nlines
             READ(file_unit, '(a)') lines_defor(i)
           END DO

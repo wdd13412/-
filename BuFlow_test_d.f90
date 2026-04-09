@@ -185,10 +185,8 @@ CONTAINS
     ncells = meshinfo(1)
 ! P, T, 和每个方向的速度
     nvars = 2 + ndims
-!		allocate(sol(nCells, nVars))
-!		allocate(initialValues(nVars))
-! 修改1: 修正数组构造器语法
-! 第1维：P
+    IF (.NOT.ALLOCATED(sol)) ALLOCATE(sol(ncells, nvars))
+    IF (.NOT.ALLOCATED(initialvalues)) ALLOCATE(initialvalues(nvars))
     initialvalues(1) = p
 ! 第2维：T
     initialvalues(2) = t
@@ -486,22 +484,45 @@ CONTAINS
 !		if (present(nDims)) nDims_val = nDims
     nconservedvars = 2 + ndims_val
     nfluxes = nconservedvars*ndims_val
-!       allocate(sln)
-! 分配结构体数组
-!		allocate(sln%cellPrimitives(nCells, nConservedVars), source=0.0d0)
-!		allocate(sln%cellState(nCells, nConservedVars), source=0.0d0)
-!		allocate(sln%cellFluxes(nCells, nFluxes), source=0.0d0)
-!		allocate(sln%fluxResiduals(nCells, nConservedVars), source=0.0d0)
-!		allocate(sln%faceFluxes(nFaces, nFluxes), source=0.0d0)
-!!!!!!!!!!		
-!		sln%cellPrimitives(1:nCells, 1:nConservedVars) = cellPrimitives(1:nCells, 1:nConservedVars)
-!		!$AD OUTPUT sln%cellPrimitives(1:nCells, 1:5)  ! 输出可微（添加切片）
-!		sln%cellState(1:nCells, 1:nConservedVars) = 0.0d0  ! 显式初始化+切片
-!		sln%cellFluxes(1:nCells, 1:nFluxes) = 0.0d0        ! 显式初始化+切片
-!		sln%fluxResiduals(1:nCells, 1:nConservedVars) = 0.0d0  ! 显式初始化+切片
-!		sln%faceFluxes(1:nFaces, 1:nFluxes) = 0.0d0        ! 显式初始化+切片
-!!!!!!!!!!!!!!
-! 赋初值
+    IF (.NOT.ALLOCATED(cellprimitives_sln)) ALLOCATE(cellprimitives_sln(ncells, nconservedvars))
+    IF (.NOT.ALLOCATED(cellstate_sln)) ALLOCATE(cellstate_sln(ncells, nconservedvars))
+    IF (.NOT.ALLOCATED(cellfluxes_sln)) ALLOCATE(cellfluxes_sln(ncells, nfluxes))
+    IF (.NOT.ALLOCATED(fluxresiduals_sln)) ALLOCATE(fluxresiduals_sln(ncells, nconservedvars))
+    IF (.NOT.ALLOCATED(facefluxes_sln)) ALLOCATE(facefluxes_sln(nfaces, nfluxes))
+    IF (.NOT.ALLOCATED(encodeprimitives3dd)) ALLOCATE(encodeprimitives3dd(ncells, nconservedvars))
+    IF (.NOT.ALLOCATED(dt_solve)) ALLOCATE(dt_solve(ncells))
+    IF (.NOT.ALLOCATED(fluxresiduals)) ALLOCATE(fluxresiduals(ncells, nconservedvars))
+    IF (.NOT.ALLOCATED(currentboundary)) ALLOCATE(currentboundary(SIZE(boundaryfaces_mesh, 2)))
+    IF (.NOT.ALLOCATED(fdeltas)) ALLOCATE(fdeltas(nfaces, nconservedvars))
+    IF (.NOT.ALLOCATED(fdgrads)) ALLOCATE(fdgrads(ncells, nconservedvars, 3))
+    IF (.NOT.ALLOCATED(p_eps)) ALLOCATE(p_eps(ncells))
+    IF (.NOT.ALLOCATED(gradp)) ALLOCATE(gradp(ncells, 3))
+    IF (.NOT.ALLOCATED(p_matrix)) ALLOCATE(p_matrix(nfaces, nconservedvars))
+    IF (.NOT.ALLOCATED(temp_grad)) ALLOCATE(temp_grad(ncells, nconservedvars, 3))
+    IF (.NOT.ALLOCATED(facevals)) ALLOCATE(facevals(nfaces, nconservedvars))
+    IF (.NOT.ALLOCATED(sj)) ALLOCATE(sj(ncells))
+    IF (.NOT.ALLOCATED(sjcount)) ALLOCATE(sjcount(ncells))
+    IF (.NOT.ALLOCATED(rj)) ALLOCATE(rj(ncells))
+    IF (.NOT.ALLOCATED(rjsjf)) ALLOCATE(rjsjf(ncells, nconservedvars))
+    IF (.NOT.ALLOCATED(eps2)) ALLOCATE(eps2(ncells))
+    IF (.NOT.ALLOCATED(eps4)) ALLOCATE(eps4(ncells))
+    IF (.NOT.ALLOCATED(eps22)) ALLOCATE(eps22(nfaces))
+    IF (.NOT.ALLOCATED(eps44)) ALLOCATE(eps44(nfaces))
+    IF (.NOT.ALLOCATED(diffusionflux)) ALLOCATE(diffusionflux(nfaces))
+    IF (.NOT.ALLOCATED(unitfa)) ALLOCATE(unitfa(nfaces))
+    IF (.NOT.ALLOCATED(fd)) ALLOCATE(fd(nfaces))
+    IF (.NOT.ALLOCATED(farownerfd)) ALLOCATE(farownerfd(nfaces))
+    IF (.NOT.ALLOCATED(farneighbourfd)) ALLOCATE(farneighbourfd(nfaces))
+    IF (.NOT.ALLOCATED(epss)) ALLOCATE(epss(nfaces, nconservedvars))
+    IF (.NOT.ALLOCATED(timefluxes)) ALLOCATE(timefluxes(ncells))
+    IF (.NOT.ALLOCATED(surfaceareas)) ALLOCATE(surfaceareas(ncells))
+    IF (.NOT.ALLOCATED(timefluxess)) ALLOCATE(timefluxess(ncells))
+    IF (.NOT.ALLOCATED(surfaceareass)) ALLOCATE(surfaceareass(ncells))
+    IF (.NOT.ALLOCATED(facerhot)) ALLOCATE(facerhot(nfaces, nconservedvars))
+    IF (.NOT.ALLOCATED(cellrhot)) ALLOCATE(cellrhot(ncells, nconservedvars))
+    IF (.NOT.ALLOCATED(facevel)) ALLOCATE(facevel(nfaces))
+    IF (.NOT.ALLOCATED(positionn)) ALLOCATE(positionn(nfaces))
+    IF (.NOT.ALLOCATED(dt_val)) ALLOCATE(dt_val(ncells))
     cellprimitives_sln = cellprimitives
 !		!$AD OUTPUT sln%cellPrimitives  ! 输出可微
     CALL ENCODEPRIMITIVES3D(cellprimitives, fluid, cellstate_sln)
@@ -3416,10 +3437,9 @@ CONTAINS
 ! 正确计算边界面数（忽略填充的0）
     nbdryfaces = 0
     DO bdry=1,nboundaries
-! 统计当前边界的非零元素个数
       i = 0
-      DO WHILE (i .LT. SIZE(boundaryfaces_mesh, 2) .AND. &
-&               boundaryfaces_mesh(bdry, i+1) .NE. 0)
+      DO WHILE (i .LT. SIZE(boundaryfaces_mesh, 2))
+        IF (boundaryfaces_mesh(bdry, i+1) .EQ. 0) EXIT
         i = i + 1
       END DO
       nbdryfaces = nbdryfaces + i
@@ -3716,26 +3736,30 @@ CONTAINS
     INTRINSIC MIN
     REAL(kind=8), DIMENSION(3) :: abs0
     PRINT*, 'b3'
-!		allocate(first5_refs(5,3))
-!		first5_refs = 0.0_8 !!!!!!!!!!
     PRINT*, 'Reading mesh: ', polymeshpath
     PRINT*, 'b3'
     npoints = SIZE(points_tempmesh, 1)
     nfaces = SIZE(owner_tempmesh)
     ncells = MAXVAL(owner_tempmesh)
     nboundaries = SIZE(tempmesh%boundarynames)
-!        allocate(mesh%faces(nFaces, 2))
-!        allocate(fAVecs_mesh(nFaces, 3), mesh%fCenters(nFaces, 3))
-!        allocate(cellFaceCount(nCells))
-!        allocate(mesh%cells(nCells, max_faces_per_cell))
+    max_faces_per_cell = 6
+    IF (.NOT.ALLOCATED(faces_mesh)) ALLOCATE(faces_mesh(nfaces, 2))
+    IF (.NOT.ALLOCATED(favecs_mesh)) ALLOCATE(favecs_mesh(nfaces, 3))
+    IF (.NOT.ALLOCATED(fcenters_mesh)) ALLOCATE(fcenters_mesh(nfaces, 3))
+    IF (.NOT.ALLOCATED(cellfacecount)) ALLOCATE(cellfacecount(ncells))
+    IF (.NOT.ALLOCATED(cells_mesh)) ALLOCATE(cells_mesh(ncells, max_faces_per_cell))
+    IF (.NOT.ALLOCATED(facepts)) ALLOCATE(facepts(4, 3))
+    IF (.NOT.ALLOCATED(cvols_mesh)) ALLOCATE(cvols_mesh(ncells))
+    IF (.NOT.ALLOCATED(ccenters_mesh)) ALLOCATE(ccenters_mesh(ncells, 3))
+    IF (.NOT.ALLOCATED(cellsizes_mesh)) ALLOCATE(cellsizes_mesh(ncells, 3))
+    IF (.NOT.ALLOCATED(fcs)) ALLOCATE(fcs(max_faces_per_cell, 3))
+    IF (.NOT.ALLOCATED(cell_favecs)) ALLOCATE(cell_favecs(max_faces_per_cell, 3))
+    IF (.NOT.ALLOCATED(cellpts)) ALLOCATE(cellpts(0, 3))
+    IF (.NOT.ALLOCATED(boundaryfaces_mesh)) ALLOCATE(boundaryfaces_mesh(nboundaries, MAXVAL(boundarynumfacess)))
     PRINT*, 'b3'
     cells_mesh = 0
     PRINT*, 'b3'
-!        allocate(mesh%cVols(nCells), mesh%cCenters(nCells, 3), mesh%cellSizes(nCells, 3))
-! 计算每个面的面积向量和几何中心
-!        allocate(facePts(size(tempMesh%faces%faces(1)%points), 3))
     DO f=1,nfaces
-!            allocate(facePts(size(tempMesh%faces%faces(f)%points), DIM_3))
       DO i=1,4
         pt_id = facepoints_tempmesh(f, i)
         facepts(i, :) = points_tempmesh(pt_id, :)
@@ -4688,16 +4712,18 @@ CONTAINS
       READ(file_unit, '(a)', iostat=iostat) 
       IF (iostat .NE. 0) THEN
         REWIND(file_unit) 
-!        allocate(lines_Faces(nLines))
+        IF (ALLOCATED(lines_faces)) DEALLOCATE(lines_faces)
+        ALLOCATE(lines_faces(nlines))
         DO i=1,nlines
           READ(file_unit, '(a)') lines_faces(i)
         END DO
         CLOSE(file_unit) 
         CALL OFFILE_FINDNITEMS(lines_faces, startline, fcount)
-!        allocate(tmp_faces(fCount))
+        IF (ALLOCATED(tmp_faces)) DEALLOCATE(tmp_faces)
+        ALLOCATE(tmp_faces(fcount))
 ! 循环外一次性分配
-!		allocate(pts_Faces(max_pt_count), source=0_int64)
-!		allocate(facePoints(fCount, 4)) 
+        IF (.NOT.ALLOCATED(pts_faces)) ALLOCATE(pts_faces(4))
+        pts_faces = 0
 ! 解析面数据
         PRINT*, 'A'
         DO i=1,fcount
@@ -4747,7 +4773,8 @@ CONTAINS
         READ(file_unit, '(a)', iostat=iostat) 
         IF (iostat .NE. 0) THEN
           REWIND(file_unit) 
-!        allocate(lines(nLines))
+          IF (ALLOCATED(lines_owner)) DEALLOCATE(lines_owner)
+          ALLOCATE(lines_owner(nlines))
           DO i=1,nlines
             READ(file_unit, '(a)') lines_owner(i)
           END DO
@@ -4815,11 +4842,9 @@ CONTAINS
         READ(file_unit, '(a)', iostat=iostat) 
         IF (iostat .NE. 0) THEN
           REWIND(file_unit) 
-! 重置文件指针
-! 4. 存储所有行内容（与owner逻辑一致）
-!		allocate(lines(nLines))  ! 分配存储所有行的数组
+          IF (ALLOCATED(lines_neighbour)) DEALLOCATE(lines_neighbour)
+          ALLOCATE(lines_neighbour(nlines))
           DO i=1,nlines
-! 逐行读取内容
             READ(file_unit, '(a)') lines_neighbour(i)
           END DO
           CLOSE(file_unit) 
@@ -4885,10 +4910,11 @@ CONTAINS
       READ(file_unit, '(a)', iostat=iostat) 
       IF (iostat .NE. 0) THEN
         REWIND(file_unit) 
-!        allocate(bLines(nLines))
-!        do i = 1, nLines
-!            read(file_unit, '(a)') bLines(i)
-!        end do
+        IF (ALLOCATED(blines)) DEALLOCATE(blines)
+        ALLOCATE(blines(nlines))
+        DO i = 1, nlines
+            READ(file_unit, '(a)') blines(i)
+        END DO
         CLOSE(file_unit) 
         CALL OFFILE_FINDNITEMS(blines, startline, bcount)
 !        if (bCount <= 0) then
@@ -4906,11 +4932,17 @@ CONTAINS
           bnfacesline = FINDINLINES('nFaces', blines, startline)
           pos = INDEX(blines(bnfacesline), 'nFaces') + 6
           PRINT*, 'A1'
-          READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
+          linestr = blines(bnfacesline)(pos:)
+          pos = INDEX(linestr, ';')
+          IF (pos .GT. 0) linestr(pos:pos) = ' '
+          READ(linestr, *) boundarynumfacess(i)
           PRINT*, 'A2'
           bstartfaceline = FINDINLINES('startFace', blines, startline)
           pos = INDEX(blines(bstartfaceline), 'startFace') + 9
-          READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
+          linestr = blines(bstartfaceline)(pos:)
+          pos = INDEX(linestr, ';')
+          IF (pos .GT. 0) linestr(pos:pos) = ' '
+          READ(linestr, *) boundarystartfacess(i)
           boundarystartfacess(i) = boundarystartfacess(i) + 1
 !boundaryEndFaces(i) = boundaryStartFacess(i) + boundaryNumFacess(i) - 1
           startline = FINDINLINES('}', blines, startline) + 1
@@ -7411,6 +7443,7 @@ CONTAINS
 !U = [33.30d0, 0.7d0, 0.0d0] !mach=0.096
 !mach=0.096		
     u = (/273.0d0, 0.0d0, 0.0d0/)
+    IF (.NOT.ALLOCATED(uunitvec)) ALLOCATE(uunitvec(3))
     CALL NORMALIZE(u, uunitvec)
     arg1 = fluid%gammaa*fluid%r*t
     a = SQRT(arg1)
@@ -7453,13 +7486,24 @@ CONTAINS
 ! 读取网格
     meshpath = 'mesh/OFairfoilMesh'
 !!!!!!!!!!!	   
-!		allocate(tempMesh%owner(0), neighbour_tempMesh(0))		    
+!		allocate(tempMesh%owner(0), neighbour_tempMesh(0))
+    IF (.NOT.ALLOCATED(point_update)) THEN
+      point_update = READOFPOINTSFILEF(TRIM(meshpath)//'/points')
+    END IF
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
     nfaces = SIZE(owner_tempmesh)
     ncells = MAXVAL(owner_tempmesh)
     nboundaries = SIZE(tempmesh%boundarynames)
-!        allocate(first5_refs(5,3))		  
-!call OpenFOAMMesh(meshPath, point_update, mesh)
+    IF (ALLOCATED(tempmesh%boundarynumfaces)) THEN
+      IF (ALLOCATED(boundarynumfacess)) DEALLOCATE(boundarynumfacess)
+      ALLOCATE(boundarynumfacess(SIZE(tempmesh%boundarynumfaces)))
+      boundarynumfacess = tempmesh%boundarynumfaces
+    END IF
+    IF (ALLOCATED(tempmesh%boundarystartfaces)) THEN
+      IF (ALLOCATED(boundarystartfacess)) DEALLOCATE(boundarystartfacess)
+      ALLOCATE(boundarystartfacess(SIZE(tempmesh%boundarystartfaces)))
+      boundarystartfacess = tempmesh%boundarystartfaces
+    END IF
     PRINT*, 'abc'
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
     PRINT*, 'abc'
@@ -7572,6 +7616,7 @@ CONTAINS
     p = 100000.0d0
     t = 300.0d0
     u = (/273.0d0, 0.0d0, 0.0d0/)
+    IF (.NOT.ALLOCATED(uunitvec)) ALLOCATE(uunitvec(3))
     CALL NORMALIZE(u, uunitvec)
     arg1 = fluid%gammaa*fluid%r*t
     a = SQRT(arg1)
@@ -7637,6 +7682,7 @@ CONTAINS
     p = 100000.0d0
     t = 300.0d0
     u = (/273.00d0, 0.0d0, 0.0d0/)
+    IF (.NOT.ALLOCATED(uunitvec)) ALLOCATE(uunitvec(3))
     CALL NORMALIZE(u, uunitvec)
     arg1 = fluid%gammaa*fluid%r*t
     a = SQRT(arg1)
@@ -7707,6 +7753,8 @@ CONTAINS
     u(2) = 0.0d0
     ud(3) = 0.0_8
     u(3) = 0.0d0
+    IF (.NOT.ALLOCATED(uunitvec)) ALLOCATE(uunitvec(3))
+    IF (.NOT.ALLOCATED(uunitvecd)) ALLOCATE(uunitvecd(3))
     CALL NORMALIZE_DD(u, ud, uunitvec, uunitvecd)
     temp = (fluid%gammaa-1.0_8)*(machnum*machnum)/2.0_8 + 1.0_8
     temp0 = fluid%gammaa/(fluid%gammaa-1.0_8)
@@ -7800,6 +7848,7 @@ CONTAINS
     u(1) = machnum*a
     u(2) = 0.0d0
     u(3) = 0.0d0
+    IF (.NOT.ALLOCATED(uunitvec)) ALLOCATE(uunitvec(3))
     CALL NORMALIZE(u, uunitvec)
     pt = p*(1.0_8+(fluid%gammaa-1.0_8)/2.0_8*machnum**2)**(fluid%gammaa/&
 &     (fluid%gammaa-1.0_8))
