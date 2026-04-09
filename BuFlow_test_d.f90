@@ -165,8 +165,12 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_flux_jacobian = .FALSE.
   REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
+  LOGICAL, SAVE :: pc_use_auto_mass_stab = .TRUE.
+  REAL(kind=8), SAVE :: pc_mass_auto_beta = 0.08d0
   REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
+  LOGICAL, SAVE :: pc_use_pressure_laplace_reg = .TRUE.
+  REAL(kind=8), SAVE :: pc_press_laplace_beta = 0.12d0
   ! ===== AM^{-1} polynomial defect-correction =====
   LOGICAL, SAVE :: pc_use_am1 = .TRUE.
   REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
@@ -8577,6 +8581,7 @@ CONTAINS
 	  REAL(kind=8) :: nx, ny, nz, amag, un, a_face, lam_face
 	  REAL(kind=8) :: ux_face, uy_face, uz_face, t_face
 	  REAL(kind=8) :: wtot, mass_coeff, volc
+	  REAL(kind=8) :: dist_on, p_lap
 	  REAL(kind=8) :: w_face(5), J5(5,5), Jface(5,5), Jconv(5,5)
 	    ! ==== robust-PC locals: drop compensation + shifted ILU ====
 	  INTEGER(kind=8) :: ii, pp, jj, i
@@ -8732,6 +8737,15 @@ CONTAINS
 		END IF
 		wtot = diff_w * Dsc
 		Jconv = conv_w * Jconv + wtot * J5
+        IF (pc_use_pressure_laplace_reg .AND. ALLOCATED(ccenters_mesh) .AND. &
+        &   SIZE(ccenters_mesh,1) >= ncells .AND. SIZE(ccenters_mesh,2) >= 3) THEN
+          dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
+          &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
+          &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
+          dist_on = MAX(dist_on, 1.0d-12)
+          p_lap = pc_press_laplace_beta * (amag / dist_on)
+          Jconv(1,1) = Jconv(1,1) + p_lap
+        END IF
 
 		p = pc_diag_pos(ownercell)
 		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
@@ -8752,12 +8766,18 @@ CONTAINS
 		  pc_blk(p,5,5) = pc_blk(p,5,5) + 1.0d-10
 		END IF
 	  END DO
-	  IF (pc_use_pseudo_time_mass) THEN
+	  IF (pc_use_pseudo_time_mass .OR. pc_use_auto_mass_stab) THEN
 		DO c = 1_8, ncells
 		  p = pc_diag_pos(c)
 		  IF (p <= 0_8) CYCLE
 		  volc = MAX(cvols_mesh(c), 1.0d-30)
-		  mass_coeff = pc_mass_cfl * (lam_sum(c) + Dscalar(c)) / volc
+          mass_coeff = 0.0_8
+          IF (pc_use_pseudo_time_mass) THEN
+		    mass_coeff = pc_mass_cfl * (lam_sum(c) + Dscalar(c)) / volc
+          END IF
+          IF (pc_use_auto_mass_stab) THEN
+            mass_coeff = MAX(mass_coeff, pc_mass_auto_beta * (lam_sum(c) + Dscalar(c)) / volc)
+          END IF
 		  mass_coeff = MAX(mass_coeff, pc_mass_floor)
 		  w_face(1:5) = cellprimitives(c, 1:5)
 		  CALL BUILD_DUDW_5X5(w_face, fluid, J5)
@@ -8766,7 +8786,8 @@ CONTAINS
 	  END IF
       IF (pc_use_coarse_pv_schur) pc_use_two_level = .TRUE.
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
-	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am_poly=', pc_use_am_poly, &
+	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' auto_mass=', pc_use_auto_mass_stab, &
+    &         ' p_lap=', pc_use_pressure_laplace_reg, ' am_poly=', pc_use_am_poly, &
 	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level, &
     &         ' coarse_pv_schur=', pc_use_coarse_pv_schur, ' schur_split=', pc_use_schur_split
         ! 0) 先保留你已有的对角小正则
