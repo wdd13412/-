@@ -161,11 +161,21 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_pschur = .TRUE.
 	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 2_8
 	REAL(kind=8), SAVE :: pc_pschur_diag_eps = 1.0d-10
+  ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
+  LOGICAL, SAVE :: pc_use_flux_jacobian = .TRUE.
+  REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
+  LOGICAL, SAVE :: pc_use_pseudo_time_mass = .TRUE.
+  REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
+  REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
+  ! ===== AM^{-1} one-step defect correction =====
+  LOGICAL, SAVE :: pc_use_am1 = .TRUE.
+  REAL(kind=8), SAVE :: pc_am1_omega = 0.50d0
 
 	! 压力Schur近似：标量稀疏（沿用cell邻接图）
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_off(:)       ! (nnzb) 仅邻接项，含对角位可复用
 	LOGICAL, SAVE :: pc_sp_ready = .FALSE.
+  REAL(kind=8), ALLOCATABLE, SAVE :: point_updated_rhs(:, :)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 CONTAINS
@@ -8417,7 +8427,7 @@ CONTAINS
 	  INTEGER(kind=8) :: ownercell, neighbourcell
 	  INTEGER(kind=8) :: meshinfo(4)
 	  REAL(kind=8) :: sigma_pc, eps_pc_face, area_face, Dsc
-	  REAL(kind=8), ALLOCATABLE :: Dscalar(:), wface(:)
+	  REAL(kind=8), ALLOCATABLE :: Dscalar(:), wface(:), lam_sum(:)
 	  TYPE(FLUIDD) :: fluid
 	  ! W = diag(scale)*Wtilde => dR/dWtilde = (dR/dW)*diag(scale)；欄 k 乘以 pc_s_*
 	  ! 與 APPLY_PC_INV 內參數必須完全一致
@@ -8429,8 +8439,8 @@ CONTAINS
 	  REAL(kind=8) :: conv_w, diff_w
 	  REAL(kind=8) :: nx, ny, nz, amag, un, a_face, lam_face
 	  REAL(kind=8) :: ux_face, uy_face, uz_face, t_face
-	  REAL(kind=8) :: wtot
-	  REAL(kind=8) :: w_face(5), J5(5,5)
+	  REAL(kind=8) :: wtot, mass_coeff, volc
+	  REAL(kind=8) :: w_face(5), J5(5,5), Jface(5,5), Jconv(5,5)
 	    ! ==== robust-PC locals: drop compensation + shifted ILU ====
 	  INTEGER(kind=8) :: ii, pp, jj, i
 	  REAL(kind=8) :: ndiag, nblk, tinyv, drop_th, dropped_sum, compv
@@ -8456,9 +8466,10 @@ CONTAINS
 	  nfaces = meshinfo(2)
 	  nbdryfaces = meshinfo(4)
 
-	  ALLOCATE(Dscalar(ncells), wface(nfaces))
+	  ALLOCATE(Dscalar(ncells), wface(nfaces), lam_sum(ncells))
 	  Dscalar = 0.0_8
 	  wface = 0.0_8
+	  lam_sum = 0.0_8
 
 	  DO f = 1_8, nfaces-nbdryfaces
 		ownercell = faces_mesh(f,1)
@@ -8561,10 +8572,11 @@ CONTAINS
 		un = ABS((ux_face*nx + uy_face*ny + uz_face*nz) / amag)
 		a_face = SQRT(MAX(1.0d-30, fluid%gammaa*fluid%r*t_face))
 		lam_face = (un + a_face) * amag
+		lam_sum(ownercell) = lam_sum(ownercell) + lam_face
+		lam_sum(neighbourcell) = lam_sum(neighbourcell) + lam_face
 
 		eps_pc_face = eps22(f) + sigma_pc * eps44(f)
 		Dsc = eps_pc_face * amag
-		wtot = conv_w*lam_face + diff_w*Dsc
 
 		w_face(1) = 0.5_8*(cellprimitives(ownercell,1) + cellprimitives(neighbourcell,1))
 		w_face(2) = 0.5_8*(cellprimitives(ownercell,2) + cellprimitives(neighbourcell,2))
@@ -8573,15 +8585,23 @@ CONTAINS
 		w_face(5) = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
 
 		CALL BUILD_DUDW_5X5(w_face, fluid, J5)
+		IF (pc_use_flux_jacobian) THEN
+		  CALL BUILD_FACE_FLUX_JACOBIAN_FD_5X5(w_face, fluid, nx, ny, nz, Jface)
+		  Jconv = pc_flux_jac_blend*Jface + (1.0_8-pc_flux_jac_blend)*(lam_face*J5)
+		ELSE
+		  Jconv = lam_face * J5
+		END IF
+		wtot = diff_w * Dsc
+		Jconv = conv_w * Jconv + wtot * J5
 
 		p = pc_diag_pos(ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + wtot * J5
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
 		p = pc_diag_pos(neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + wtot * J5
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
 		p = FIND_BLOCK_POS(ownercell, neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - wtot * J5
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jconv
 		p = FIND_BLOCK_POS(neighbourcell, ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - wtot * J5
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jconv
 	  END DO
 	  DO c = 1_8, ncells
 		p = pc_diag_pos(c)
@@ -8593,6 +8613,20 @@ CONTAINS
 		  pc_blk(p,5,5) = pc_blk(p,5,5) + 1.0d-10
 		END IF
 	  END DO
+	  IF (pc_use_pseudo_time_mass) THEN
+		DO c = 1_8, ncells
+		  p = pc_diag_pos(c)
+		  IF (p <= 0_8) CYCLE
+		  volc = MAX(cvols_mesh(c), 1.0d-30)
+		  mass_coeff = pc_mass_cfl * (lam_sum(c) + Dscalar(c)) / volc
+		  mass_coeff = MAX(mass_coeff, pc_mass_floor)
+		  w_face(1:5) = cellprimitives(c, 1:5)
+		  CALL BUILD_DUDW_5X5(w_face, fluid, J5)
+		  pc_blk(p,:,:) = pc_blk(p,:,:) + mass_coeff * J5
+		END DO
+	  END IF
+	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
+	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am1=', pc_use_am1
         ! 0) 先保留你已有的对角小正则
 	  !    pc_blk(p,k,k) += 1.0d-10  (已有)
 
@@ -8703,7 +8737,7 @@ CONTAINS
 		  pc_coarse_ready = .FALSE.
 		END IF
 
-	  DEALLOCATE(Dscalar, wface, deg, fill, nlist, row_cnt)
+	  DEALLOCATE(Dscalar, wface, lam_sum, deg, fill, nlist, row_cnt)
 	END SUBROUTINE BUILD_PC_JST_L1
 	SUBROUTINE PC_BUILD_PRESSURE_SCHUR_STRONG(ncells)
 	  IMPLICIT NONE
@@ -9472,133 +9506,132 @@ CONTAINS
 
 	  DEALLOCATE(rc, ec)
 	END SUBROUTINE PC_COARSE_CORRECT_AGG
-	SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
-	  IMPLICIT NONE
-	  REAL(kind=8), INTENT(IN)  :: vec_in(:)
-	  REAL(kind=8), INTENT(OUT) :: vec_out(:)
+SUBROUTINE PC_APPLY_ILU_CORE(vec_in, vec_out)
+  IMPLICIT NONE
+  REAL(kind=8), INTENT(IN)  :: vec_in(:)
+  REAL(kind=8), INTENT(OUT) :: vec_out(:)
 
-	  INTEGER(kind=8) :: ncells, i, j, p, ii, ri, rj
-	  REAL(kind=8), ALLOCATABLE :: y(:, :)
-	  REAL(kind=8) :: rhs(5), tmp(5)
-	  REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), ecorr(:)
-	  REAL(kind=8), ALLOCATABLE :: Az2(:), rr2(:), ecorr2(:)
-	  ncells = SIZE(vec_in) / 5
+  INTEGER(kind=8) :: ncells, i, j, p, ii, ri, rj
+  REAL(kind=8), ALLOCATABLE :: y(:, :)
+  REAL(kind=8) :: rhs(5), tmp(5)
 
-	  IF (.NOT. pc_ready) THEN
-		vec_out = vec_in
-		RETURN
-	  END IF
-	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. &
-		  .NOT. ALLOCATED(pc_blk) .OR. .NOT. ALLOCATED(pc_uinv)) THEN
-		vec_out = vec_in
-		RETURN
-	  END IF
-	  IF (ncells /= pc_ncells) THEN
-		vec_out = vec_in
-		RETURN
-	  END IF
+  ncells = SIZE(vec_in) / 5
+  IF (.NOT. pc_ready) THEN
+    vec_out = vec_in
+    RETURN
+  END IF
+  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. &
+  &   .NOT. ALLOCATED(pc_blk) .OR. .NOT. ALLOCATED(pc_uinv)) THEN
+    vec_out = vec_in
+    RETURN
+  END IF
+  IF (ncells /= pc_ncells) THEN
+    vec_out = vec_in
+    RETURN
+  END IF
 
-	  ALLOCATE(y(ncells,5))
-	  y = 0.0_8
-	  vec_out = 0.0_8
+  ALLOCATE(y(ncells,5))
+  y = 0.0_8
+  vec_out = 0.0_8
 
-	  !========================
-	  ! 前代：按 RCM 顺序
-	  !========================
-	  DO ii = 1_8, ncells
-		IF (pc_use_rcm_order .AND. ALLOCATED(pc_perm) .AND. SIZE(pc_perm) >= ncells) THEN
-		  i = pc_perm(ii)
-		ELSE
-		  i = ii
-		END IF
+  DO ii = 1_8, ncells
+    IF (pc_use_rcm_order .AND. ALLOCATED(pc_perm) .AND. SIZE(pc_perm) >= ncells) THEN
+      i = pc_perm(ii)
+    ELSE
+      i = ii
+    END IF
 
-		rhs = vec_in((i-1_8)*5+1:(i-1_8)*5+5)
+    rhs = vec_in((i-1_8)*5+1:(i-1_8)*5+5)
+    ri = i
+    IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
+      ri = pc_iperm(i)
+    END IF
 
-		ri = i
-		IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-		  ri = pc_iperm(i)
-		END IF
+    DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+      j = pc_col_ind(p)
+      rj = j
+      IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
+        rj = pc_iperm(j)
+      END IF
+      IF (rj < ri) THEN
+        CALL MATVEC5(pc_blk(p,:,:), y(j,:), tmp)
+        rhs = rhs - tmp
+      END IF
+    END DO
+    y(i,:) = rhs
+  END DO
 
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  j = pc_col_ind(p)
+  DO ii = ncells, 1_8, -1_8
+    IF (pc_use_rcm_order .AND. ALLOCATED(pc_perm) .AND. SIZE(pc_perm) >= ncells) THEN
+      i = pc_perm(ii)
+    ELSE
+      i = ii
+    END IF
 
-		  rj = j
-		  IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-		    rj = pc_iperm(j)
-		  END IF
+    rhs = y(i,:)
+    ri = i
+    IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
+      ri = pc_iperm(i)
+    END IF
 
-		  IF (rj < ri) THEN
-		    CALL MATVEC5(pc_blk(p,:,:), y(j,:), tmp)
-		    rhs = rhs - tmp
-		  END IF
-		END DO
+    DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+      j = pc_col_ind(p)
+      rj = j
+      IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
+        rj = pc_iperm(j)
+      END IF
+      IF (rj > ri) THEN
+        CALL MATVEC5(pc_blk(p,:,:), vec_out((j-1_8)*5+1:(j-1_8)*5+5), tmp)
+        rhs = rhs - tmp
+      END IF
+    END DO
+    CALL MATVEC5(pc_uinv(i,:,:), rhs, vec_out((i-1_8)*5+1:(i-1_8)*5+5))
+  END DO
 
-		y(i,:) = rhs
-	  END DO
+  DEALLOCATE(y)
+END SUBROUTINE PC_APPLY_ILU_CORE
+SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
+  IMPLICIT NONE
+  REAL(kind=8), INTENT(IN)  :: vec_in(:)
+  REAL(kind=8), INTENT(OUT) :: vec_out(:)
 
-	  !========================
-	  ! 回代：按 RCM 逆序
-	  !========================
-	  DO ii = ncells, 1_8, -1_8
-		IF (pc_use_rcm_order .AND. ALLOCATED(pc_perm) .AND. SIZE(pc_perm) >= ncells) THEN
-		  i = pc_perm(ii)
-		ELSE
-		  i = ii
-		END IF
+  INTEGER(kind=8) :: ncells
+  REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), ecorr(:)
+  REAL(kind=8), ALLOCATABLE :: Az2(:), rr2(:), ecorr2(:)
 
-		rhs = y(i,:)
+  ncells = SIZE(vec_in) / 5
+  CALL PC_APPLY_ILU_CORE(vec_in, vec_out)
+  IF (.NOT. pc_ready) RETURN
 
-		ri = i
-		IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-		  ri = pc_iperm(i)
-		END IF
+  ! One-step AM^{-1} defect correction: z <- M^{-1}r + w*M^{-1}(r-A0*M^{-1}r)
+  IF (pc_use_am1 .AND. pc_a0_ready) THEN
+    ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
+    CALL PC_APPLY_A0(ncells, vec_out, Az)
+    rr = vec_in - Az
+    CALL PC_APPLY_ILU_CORE(rr, ecorr)
+    vec_out = vec_out + pc_am1_omega * ecorr
+    DEALLOCATE(Az, rr, ecorr)
+  END IF
 
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  j = pc_col_ind(p)
+  IF (pc_use_pschur .AND. pc_sp_ready) THEN
+    ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
+    CALL PC_APPLY_A0(ncells, vec_out, Az)
+    rr = vec_in - Az
+    ecorr = 0.0_8
+    CALL PC_APPLY_PRESSURE_SCHUR_CORR(ncells, rr, ecorr)
+    vec_out = vec_out + 0.2_8 * ecorr
+    DEALLOCATE(Az, rr, ecorr)
+  END IF
 
-		  rj = j
-		  IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-		    rj = pc_iperm(j)
-		  END IF
-
-		  IF (rj > ri) THEN
-		    CALL MATVEC5(pc_blk(p,:,:), vec_out((j-1_8)*5+1:(j-1_8)*5+5), tmp)
-		    rhs = rhs - tmp
-		  END IF
-		END DO
-
-		CALL MATVEC5(pc_uinv(i,:,:), rhs, vec_out((i-1_8)*5+1:(i-1_8)*5+5))
-	  END DO
-	    ! --- pressure Schur-lite correction (after ILU, before coarse) ---
-	  IF (pc_use_pschur .AND. pc_sp_ready) THEN
-		ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
-
-		CALL PC_APPLY_A0(ncells, vec_out, Az)
-		rr = vec_in - Az
-
-		ecorr = 0.0_8
-		CALL PC_APPLY_PRESSURE_SCHUR_CORR(ncells, rr, ecorr)
-		vec_out = vec_out + 0.2_8 * ecorr
-
-		DEALLOCATE(Az, rr, ecorr)
-	  END IF
-	  !========================
-	  ! 二级粗空间修正（保留你现有逻辑）
-	  !========================
-	  IF (pc_use_two_level .AND. pc_coarse_ready) THEN
-		ALLOCATE(Az2(ncells*5), rr2(ncells*5), ecorr2(ncells*5))
-
-		CALL PC_APPLY_A0(ncells, vec_out, Az2)
-		rr2 = vec_in - Az2
-
-		CALL PC_COARSE_CORRECT_AGG(ncells, rr2, ecorr2)
-		vec_out = vec_out + ecorr2
-
-		DEALLOCATE(Az2, rr2, ecorr2)
-	  END IF
-
-	  DEALLOCATE(y)
-	END SUBROUTINE APPLY_PC_INV
+  IF (pc_use_two_level .AND. pc_coarse_ready) THEN
+    ALLOCATE(Az2(ncells*5), rr2(ncells*5), ecorr2(ncells*5))
+    CALL PC_APPLY_A0(ncells, vec_out, Az2)
+    rr2 = vec_in - Az2
+    CALL PC_COARSE_CORRECT_AGG(ncells, rr2, ecorr2)
+    vec_out = vec_out + ecorr2
+    DEALLOCATE(Az2, rr2, ecorr2)
+  END IF
+END SUBROUTINE APPLY_PC_INV
 	
 	INTEGER(kind=8) FUNCTION FIND_BLOCK_POS(irow, jcol)
 	  IMPLICIT NONE
@@ -9640,6 +9673,64 @@ CONTAINS
 		END DO
 	  END DO
 	END SUBROUTINE MATVEC5
+SUBROUTINE FACE_FLUX_FROM_PRIM_5(wp, fluid, nx, ny, nz, fvec)
+  IMPLICIT NONE
+  REAL(kind=8), INTENT(IN) :: wp(5)
+  TYPE(FLUIDD), INTENT(IN) :: fluid
+  REAL(kind=8), INTENT(IN) :: nx, ny, nz
+  REAL(kind=8), INTENT(OUT) :: fvec(5)
+
+  REAL(kind=8) :: p, t, ux, uy, uz
+  REAL(kind=8) :: rho, cv, q2, e, h, un
+  REAL(kind=8), PARAMETER :: tiny = 1.0d-30
+
+  p  = wp(1)
+  t  = MAX(wp(2), tiny)
+  ux = wp(3)
+  uy = wp(4)
+  uz = wp(5)
+
+  cv = fluid%cp - fluid%r
+  rho = p / MAX(fluid%r*t, tiny)
+  q2 = ux*ux + uy*uy + uz*uz
+  e = cv*t + 0.5_8*q2
+  h = e + p / MAX(rho, tiny)
+  un = ux*nx + uy*ny + uz*nz
+
+  fvec(1) = rho * un
+  fvec(2) = rho * ux * un + nx * p
+  fvec(3) = rho * uy * un + ny * p
+  fvec(4) = rho * uz * un + nz * p
+  fvec(5) = rho * h * un
+END SUBROUTINE FACE_FLUX_FROM_PRIM_5
+SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5(wp, fluid, nx, ny, nz, J)
+  IMPLICIT NONE
+  REAL(kind=8), INTENT(IN) :: wp(5)
+  TYPE(FLUIDD), INTENT(IN) :: fluid
+  REAL(kind=8), INTENT(IN) :: nx, ny, nz
+  REAL(kind=8), INTENT(OUT) :: J(5,5)
+
+  REAL(kind=8) :: w_pert(5), f0(5), f1(5), dw, tinyv
+  INTEGER(kind=8) :: k
+
+  tinyv = 1.0d-12
+  CALL FACE_FLUX_FROM_PRIM_5(wp, fluid, nx, ny, nz, f0)
+  J = 0.0_8
+
+  DO k = 1_8, 5_8
+    w_pert = wp
+    dw = 1.0d-6 * MAX(ABS(wp(k)), 1.0_8)
+    IF (k == 2_8) THEN
+      w_pert(k) = MAX(wp(k) + dw, 1.0d-8)
+      dw = w_pert(k) - wp(k)
+    ELSE
+      w_pert(k) = wp(k) + dw
+    END IF
+    IF (ABS(dw) < tinyv) dw = SIGN(tinyv, dw + tinyv)
+    CALL FACE_FLUX_FROM_PRIM_5(w_pert, fluid, nx, ny, nz, f1)
+    J(1:5,k) = (f1(1:5) - f0(1:5)) / dw
+  END DO
+END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 	SUBROUTINE BUILD_DUDW_5X5(wp, fluid, J)
 	  IMPLICIT NONE
 	  REAL(kind=8), INTENT(IN)  :: wp(5)     ! [P,T,Ux,Uy,Uz]
