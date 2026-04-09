@@ -4,7 +4,7 @@
 ! 主程序：通过use模块获取main的显式接口
 program RUN_MAIN_NODIFF
 ! 关键：使用包含main的模块，自动获取显式接口
-  USE MAIN_MODULE_DIFF
+  USE BUFLOWMODULE_DIFF
   IMPLICIT NONE
 ! 输入参数
   REAL(kind=8) :: data_4d137(1, 4)
@@ -19,8 +19,8 @@ program RUN_MAIN_NODIFF
   data_4d137(1, 3) = -0.588d0
 ! 后三个维度固定为0 
   data_4d137(1, 4) = -0.912d0
-! 调用main子程序（此时编译器已知晓其接口，支持可分配数组参数）
-  CALL MAIN(data_4d137, cellprimitivesout)
+! 调用COMPUTE_CFD子程序
+  CALL COMPUTE_CFD(cellprimitivesout)
   IF (ALLOCATED(cellprimitivesout)) THEN
     PRINT*, 'CFD计算完成，结果维度：', SIZE(cellprimitivesout&
 &   , 1), '×', SIZE(cellprimitivesout, 2)
