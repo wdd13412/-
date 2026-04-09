@@ -10178,15 +10178,23 @@ CONTAINS
             IF (j < 1_8 .OR. j > ncells) CYCLE
             IF (j == i) CYCLE
             IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3); Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
-              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3); Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
-              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3); Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
-              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3); Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
+              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3)
+              Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
+              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3)
+              Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
+              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3)
+              Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
+              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3)
+              Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
             ELSE
-              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3); Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
-              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3); Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
-              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3); Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
-              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3); Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
+              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3)
+              Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
+              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3)
+              Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
+              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3)
+              Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
+              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3)
+              Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
             END IF
             rhs4 = rhs4 - MATMUL(Auu_ij, du_pred(j,:))
           END DO
@@ -10200,15 +10208,23 @@ CONTAINS
             IF (j < 1_8 .OR. j > ncells) CYCLE
             IF (j == i) CYCLE
             IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3); Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
-              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3); Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
-              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3); Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
-              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3); Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
+              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3)
+              Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
+              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3)
+              Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
+              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3)
+              Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
+              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3)
+              Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
             ELSE
-              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3); Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
-              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3); Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
-              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3); Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
-              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3); Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
+              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3)
+              Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
+              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3)
+              Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
+              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3)
+              Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
+              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3)
+              Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
             END IF
             rhs4 = rhs4 - MATMUL(Auu_ij, du_pred(j,:))
           END DO
