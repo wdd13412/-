@@ -8766,7 +8766,7 @@ CONTAINS
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
 	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am_poly=', pc_use_am_poly, &
 	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level, &
-    &         ' coarse_pv_schur=', pc_use_coarse_pv_schur
+    &         ' coarse_pv_schur=', pc_use_coarse_pv_schur, ' schur_split=', pc_use_schur_split
         ! 0) 先保留你已有的对角小正则
 	  !    pc_blk(p,k,k) += 1.0d-10  (已有)
 
@@ -8890,6 +8890,7 @@ CONTAINS
 		  ELSE
 			IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
 		  END IF
+		  PRINT *, '[PC-SCHUR] flags: pschur=', pc_use_pschur, ' split=', pc_use_schur_split, ' sp_ready=', pc_sp_ready
 		END IF
 		IF (pc_ready .AND. pc_use_two_level) THEN
 		  CALL PC_BUILD_COARSE_AGG(ncells)
