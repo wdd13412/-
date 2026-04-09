@@ -132,7 +132,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_dc(:, :)   ! (ncells,5) 列缩放
     ! === PC 鲁棒增强开关 ===
   LOGICAL, SAVE :: pc_use_equil = .TRUE.          ! 块缩放
-  LOGICAL, SAVE :: pc_use_offdiag_drop = .FALSE.   ! 非对角门限裁剪
+  LOGICAL, SAVE :: pc_use_offdiag_drop = .TRUE.   ! 非对角门限裁剪
   INTEGER(kind=8), SAVE :: pc_equil_iters = 2_8   ! Ruiz迭代次数(1~3)
   REAL(kind=8), SAVE :: pc_drop_rel = 1.0d-3 !1.0d-3      ! 非对角相对阈值
   REAL(kind=8), SAVE :: pc_offdiag_cap = 5.0d0    ! 非对角块范数上限倍数(相对对角)
@@ -158,7 +158,7 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_rcm_order = .TRUE.
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:), pc_iperm(:)
   LOGICAL, SAVE :: pc_use_targeted_boost = .FALSE.
-  LOGICAL, SAVE :: pc_use_pschur = .FALSE.
+  LOGICAL, SAVE :: pc_use_pschur = .TRUE.
 	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 2_8
 	REAL(kind=8), SAVE :: pc_pschur_diag_eps = 1.0d-10
   ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
@@ -8154,7 +8154,7 @@ CONTAINS
 	    IF (k == 1_8) THEN
 		  eta_k = eta_prev
 		ELSE
-		  eta_k = MAX(0.2_8, 0.5_8 * eta_prev**phi_exp)
+		  eta_k = MAX(0.05_8, 0.5_8 * eta_prev**phi_exp)
 		  PRINT *, '[GMRES-DBG] outer=', k, ' eta_k=', eta_k, &
 &        ' beta_kry=', beta_kry, ' res_ls=', res_ls, &
 &        ' res_ls/(eta_k*beta)=', res_ls / MAX(1.0d-300, eta_k*beta_kry)
