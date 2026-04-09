@@ -167,9 +167,18 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
-  ! ===== AM^{-1} one-step defect correction =====
-  LOGICAL, SAVE :: pc_use_am1 = .TRUE.
+  ! ===== AM^{-1} polynomial defect-correction =====
+  LOGICAL, SAVE :: pc_use_am1 = .FALSE.
   REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
+  LOGICAL, SAVE :: pc_use_am_poly = .TRUE.
+  INTEGER(kind=8), SAVE :: pc_am_poly_steps = 2_8
+  REAL(kind=8), SAVE :: pc_am_poly_omega0 = 0.75d0
+  REAL(kind=8), SAVE :: pc_am_poly_omega_decay = 0.85d0
+  REAL(kind=8), SAVE :: pc_am_poly_omega_min = 0.20d0
+  ! ===== Gershgorin-like diagonal dominance stabilization =====
+  LOGICAL, SAVE :: pc_use_gersh_shift = .FALSE.
+  REAL(kind=8), SAVE :: pc_gersh_theta = 0.95d0
+  REAL(kind=8), SAVE :: pc_gersh_cap_rel = 0.35d0
 
 	! 压力Schur近似：标量稀疏（沿用cell邻接图）
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
@@ -8682,7 +8691,8 @@ CONTAINS
 		END DO
 	  END IF
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
-	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am1=', pc_use_am1
+	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am_poly=', pc_use_am_poly, &
+	&         ' am1=', pc_use_am1
         ! 0) 先保留你已有的对角小正则
 	  !    pc_blk(p,k,k) += 1.0d-10  (已有)
 
@@ -8766,6 +8776,7 @@ CONTAINS
 	  END IF
 	    ! --- targeted diagonal boost for ill-conditioned diagonal blocks ---
 	  IF (pc_use_targeted_boost) CALL PC_TARGETED_DIAG_BOOST(ncells)
+	  IF (pc_use_gersh_shift) CALL PC_ENFORCE_BLOCK_GERSH_SHIFT(ncells)
 	    ! ===== 备份 A0（必须在 ILU 分解前）=====
 	  IF (ALLOCATED(pc_a0_blk)) DEALLOCATE(pc_a0_blk)
 	  ALLOCATE(pc_a0_blk(SIZE(pc_blk,1), 5, 5))
@@ -9388,6 +9399,44 @@ CONTAINS
 		DEALLOCATE(off_p, off_nrm, keep_flag)
 	  END DO
 	END SUBROUTINE PC_DAMP_OFFDIAG_TOPK
+	SUBROUTINE PC_ENFORCE_BLOCK_GERSH_SHIFT(ncells)
+	  IMPLICIT NONE
+	  INTEGER(kind=8), INTENT(IN) :: ncells
+	  INTEGER(kind=8) :: i, p, pp, j, k, nshift
+	  REAL(kind=8) :: ndiag, offsum, nblk, targetv, addv, capv, tinyv
+	  REAL(kind=8) :: sum_add
+	  tinyv = 1.0d-30
+	  nshift = 0_8
+	  sum_add = 0.0_8
+	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. &
+	  &   .NOT. ALLOCATED(pc_diag_pos) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+	  DO i = 1_8, ncells
+		p = pc_diag_pos(i)
+		IF (p <= 0_8) CYCLE
+		CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
+		offsum = 0.0_8
+		DO pp = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+		  j = pc_col_ind(pp)
+		  IF (j == i) CYCLE
+		  CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
+		  offsum = offsum + nblk
+		END DO
+		targetv = pc_gersh_theta * offsum
+		IF (ndiag < targetv) THEN
+		  addv = targetv - ndiag
+		  capv = pc_gersh_cap_rel * MAX(offsum, tinyv)
+		  addv = MIN(addv, capv)
+		  IF (addv > 0.0_8) THEN
+			DO k = 1_8, 5_8
+			  pc_blk(p,k,k) = pc_blk(p,k,k) + addv
+			END DO
+			nshift = nshift + 1_8
+			sum_add = sum_add + addv
+		  END IF
+		END IF
+	  END DO
+	  PRINT *, '[PC-GERSH] rows_shifted=', nshift, ' avg_add=', sum_add/MAX(1_8,nshift)
+	END SUBROUTINE PC_ENFORCE_BLOCK_GERSH_SHIFT
 	SUBROUTINE PC_COARSE_CORRECT_5(ncells, r, e)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
@@ -9687,16 +9736,34 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
   REAL(kind=8), INTENT(IN)  :: vec_in(:)
   REAL(kind=8), INTENT(OUT) :: vec_out(:)
 
-  INTEGER(kind=8) :: ncells
+  INTEGER(kind=8) :: ncells, istep
+  REAL(kind=8) :: omega_poly
   REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), ecorr(:)
   REAL(kind=8), ALLOCATABLE :: Az2(:), rr2(:), ecorr2(:)
+  REAL(kind=8), ALLOCATABLE :: rr_poly(:), dz(:), Az_poly(:)
 
   ncells = SIZE(vec_in) / 5
-  CALL PC_APPLY_ILU_CORE(vec_in, vec_out)
-  IF (.NOT. pc_ready) RETURN
+  IF (.NOT. pc_ready) THEN
+    vec_out = vec_in
+    RETURN
+  END IF
 
-  ! One-step AM^{-1} defect correction: z <- M^{-1}r + w*M^{-1}(r-A0*M^{-1}r)
-  IF (pc_use_am1 .AND. pc_a0_ready) THEN
+  CALL PC_APPLY_ILU_CORE(vec_in, vec_out)
+  ! AM^{-1} polynomial defect-correction (multi-step Richardson on preconditioned residual)
+  IF (pc_use_am_poly .AND. pc_a0_ready) THEN
+    ALLOCATE(rr_poly(ncells*5), dz(ncells*5), Az_poly(ncells*5))
+    rr_poly = vec_in
+    vec_out = 0.0_8
+    omega_poly = pc_am_poly_omega0
+    DO istep = 1_8, MAX(1_8, pc_am_poly_steps)
+      CALL PC_APPLY_ILU_CORE(rr_poly, dz)
+      vec_out = vec_out + omega_poly * dz
+      CALL PC_APPLY_A0(ncells, dz, Az_poly)
+      rr_poly = rr_poly - omega_poly * Az_poly
+      omega_poly = MAX(pc_am_poly_omega_min, omega_poly * pc_am_poly_omega_decay)
+    END DO
+    DEALLOCATE(rr_poly, dz, Az_poly)
+  ELSEIF (pc_use_am1 .AND. pc_a0_ready) THEN
     ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
     CALL PC_APPLY_A0(ncells, vec_out, Az)
     rr = vec_in - Az
