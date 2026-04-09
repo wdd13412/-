@@ -331,8 +331,8 @@ CONTAINS
 								n = ncells*5
 								ALLOCATE(b_i(n), x_tan(n), dwdx(n, 5), rhs_rho(ncells, 5))
 								tol = 1.0d-8!tol = 1.0d-8
-								maxiter = 20
-								m_restart = 80!80,提高能提高收敛速度（试过提高200，过多会增加内存负担，影响运行速度。没验证过过高是否反而下降）
+								maxiter = 10
+								m_restart = 50!80,提高能提高收敛速度（试过提高200，过多会增加内存负担，影响运行速度。没验证过过高是否反而下降）
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8
 								CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)   ! 先建一次，保证本轮开着

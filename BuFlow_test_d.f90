@@ -132,7 +132,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_dc(:, :)   ! (ncells,5) 列缩放
     ! === PC 鲁棒增强开关 ===
   LOGICAL, SAVE :: pc_use_equil = .TRUE.          ! 块缩放
-  LOGICAL, SAVE :: pc_use_offdiag_drop = .TRUE.   ! 非对角门限裁剪
+  LOGICAL, SAVE :: pc_use_offdiag_drop = .FALSE.   ! 非对角门限裁剪
   INTEGER(kind=8), SAVE :: pc_equil_iters = 2_8   ! Ruiz迭代次数(1~3)
   REAL(kind=8), SAVE :: pc_drop_rel = 1.0d-3 !1.0d-3      ! 非对角相对阈值
   REAL(kind=8), SAVE :: pc_offdiag_cap = 5.0d0    ! 非对角块范数上限倍数(相对对角)
@@ -155,21 +155,21 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_nc = 0_8
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_agg_id(:)      ! size ncells, 1..pc_nagg
   ! ===== ILU ordering: RCM (apply in factor/solve traversal) =====
-  LOGICAL, SAVE :: pc_use_rcm_order = .TRUE.
+  LOGICAL, SAVE :: pc_use_rcm_order = .FALSE.
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:), pc_iperm(:)
   LOGICAL, SAVE :: pc_use_targeted_boost = .FALSE.
-  LOGICAL, SAVE :: pc_use_pschur = .TRUE.
+  LOGICAL, SAVE :: pc_use_pschur = .FALSE.
 	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 2_8
 	REAL(kind=8), SAVE :: pc_pschur_diag_eps = 1.0d-10
   ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
   LOGICAL, SAVE :: pc_use_flux_jacobian = .TRUE.
-  REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.72d0
+  REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .TRUE.
-  REAL(kind=8), SAVE :: pc_mass_cfl = 0.80d0
+  REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
   ! ===== AM^{-1} one-step defect correction =====
   LOGICAL, SAVE :: pc_use_am1 = .TRUE.
-  REAL(kind=8), SAVE :: pc_am1_omega = 0.35d0
+  REAL(kind=8), SAVE :: pc_am1_omega = 0.50d0
 
 	! 压力Schur近似：标量稀疏（沿用cell邻接图）
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
@@ -4879,8 +4879,6 @@ CONTAINS
     INTEGER(kind=8) :: bnameline, bnfacesline, bstartfaceline, pos
 !        character(len=256), allocatable :: bLines(:)
     CHARACTER(len=256) :: linestr, dummy
-    LOGICAL :: parse_ok
-    INTEGER(kind=8) :: parsed_i8
     INTRINSIC ADJUSTL
     INTRINSIC TRIM
     INTRINSIC INDEX
@@ -4918,21 +4916,11 @@ CONTAINS
           bnfacesline = FINDINLINES('nFaces', blines, startline)
           pos = INDEX(blines(bnfacesline), 'nFaces') + 6
           PRINT*, 'A1'
-          CALL PARSE_FIRST_INT(blines(bnfacesline)(pos:), parsed_i8, parse_ok)
-          IF (parse_ok) THEN
-            boundarynumfacess(i) = parsed_i8
-          ELSE
-            READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
-          END IF
+          READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
           PRINT*, 'A2'
           bstartfaceline = FINDINLINES('startFace', blines, startline)
           pos = INDEX(blines(bstartfaceline), 'startFace') + 9
-          CALL PARSE_FIRST_INT(blines(bstartfaceline)(pos:), parsed_i8, parse_ok)
-          IF (parse_ok) THEN
-            boundarystartfacess(i) = parsed_i8
-          ELSE
-            READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
-          END IF
+          READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
           boundarystartfacess(i) = boundarystartfacess(i) + 1
 !boundaryEndFaces(i) = boundaryStartFacess(i) + boundaryNumFacess(i) - 1
           startline = FINDINLINES('}', blines, startline) + 1
@@ -5006,48 +4994,6 @@ CONTAINS
     READ(str, *, iostat=iostat) num
     IF (iostat .EQ. 0) isnumber = .true.
   END FUNCTION ISNUMBER
-
-  SUBROUTINE PARSE_FIRST_INT(str, val, ok)
-    IMPLICIT NONE
-    CHARACTER(len=*), INTENT(IN) :: str
-    INTEGER(kind=8), INTENT(OUT) :: val
-    LOGICAL, INTENT(OUT) :: ok
-    INTEGER(kind=8) :: i, j, n, ios, signv
-    CHARACTER(len=256) :: token
-
-    ok = .FALSE.
-    val = 0_8
-    token = ''
-    n = LEN_TRIM(str)
-    IF (n <= 0_8) RETURN
-
-    i = 1_8
-    DO WHILE (i <= n)
-      IF (str(i:i) == '-' .OR. (str(i:i) >= '0' .AND. str(i:i) <= '9')) EXIT
-      i = i + 1_8
-    END DO
-    IF (i > n) RETURN
-
-    signv = 1_8
-    IF (str(i:i) == '-') THEN
-      signv = -1_8
-      i = i + 1_8
-      IF (i > n) RETURN
-    END IF
-
-    j = i
-    DO WHILE (j <= n)
-      IF (.NOT.(str(j:j) >= '0' .AND. str(j:j) <= '9')) EXIT
-      j = j + 1_8
-    END DO
-    IF (j <= i) RETURN
-
-    token = str(i:j-1_8)
-    READ(token, *, IOSTAT=ios) val
-    IF (ios /= 0) RETURN
-    val = signv * val
-    ok = .TRUE.
-  END SUBROUTINE PARSE_FIRST_INT
 
 ! 辅助函数：查找包含子串的行
   INTEGER(kind=8) FUNCTION FINDINLINES(substr, lines, startline)
@@ -8154,7 +8100,7 @@ CONTAINS
 	    IF (k == 1_8) THEN
 		  eta_k = eta_prev
 		ELSE
-		  eta_k = MAX(0.05_8, 0.5_8 * eta_prev**phi_exp)
+		  eta_k = MAX(0.2_8, 0.5_8 * eta_prev**phi_exp)
 		  PRINT *, '[GMRES-DBG] outer=', k, ' eta_k=', eta_k, &
 &        ' beta_kry=', beta_kry, ' res_ls=', res_ls, &
 &        ' res_ls/(eta_k*beta)=', res_ls / MAX(1.0d-300, eta_k*beta_kry)
@@ -9203,11 +9149,18 @@ CONTAINS
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
 
-	  INTEGER(kind=8) :: i, j, p, it
+	  INTEGER(kind=8) :: i, j, p, it, maxit
 	  REAL(kind=8), ALLOCATABLE :: rown(:), coln(:)
 	  REAL(kind=8) :: bnrm, tinyv, scaleL, scaleR
+	  REAL(kind=8) :: row_min, row_max, col_min, col_max, spread_tol
+	  REAL(kind=8) :: scale_cap_hi, scale_cap_lo
 
 	  tinyv = 1.0d-30
+	  spread_tol = 1.20d0
+	  ! 限幅避免局部极端尺度把 ILU 主元链再次拉坏
+	  scale_cap_hi = 5.0d0
+	  scale_cap_lo = 1.0d0 / scale_cap_hi
+	  maxit = MAX(6_8, pc_equil_iters)
 
 	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
 	  IF (SIZE(pc_row_ptr) < ncells+1_8) RETURN
@@ -9220,26 +9173,53 @@ CONTAINS
 
 	  ALLOCATE(rown(ncells), coln(ncells))
 
-	  DO it = 1_8, pc_equil_iters
+	  DO it = 1_8, maxit
 		rown = 0.0_8
 		coln = 0.0_8
 
-		! 统计当前矩阵的行/列块范数和
+		! 统计当前矩阵的行/列块范数（块∞范数最大值）
 		DO i = 1_8, ncells
 		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
 		    j = pc_col_ind(p)
 		    CALL BLOCK_INF_NORM5(pc_blk(p,:,:), bnrm)
-		    rown(i) = rown(i) + bnrm
-		    IF (j >= 1_8 .AND. j <= ncells) coln(j) = coln(j) + bnrm
+		    rown(i) = MAX(rown(i), bnrm)
+		    IF (j >= 1_8 .AND. j <= ncells) coln(j) = MAX(coln(j), bnrm)
 		  END DO
 		END DO
+
+		row_min = HUGE(1.0_8)
+		row_max = 0.0_8
+		col_min = HUGE(1.0_8)
+		col_max = 0.0_8
+		DO i = 1_8, ncells
+		  row_min = MIN(row_min, MAX(rown(i), tinyv))
+		  row_max = MAX(row_max, rown(i))
+		  col_min = MIN(col_min, MAX(coln(i), tinyv))
+		  col_max = MAX(col_max, coln(i))
+		END DO
+
+		IF (it > pc_equil_iters) THEN
+		  IF (row_max/row_min <= spread_tol .AND. col_max/col_min <= spread_tol) EXIT
+		END IF
 
 		! 行缩放：A_ij <- s_i * A_ij
 		DO i = 1_8, ncells
 		  scaleL = 1.0_8 / SQRT(MAX(rown(i), tinyv))
+		  scaleL = MIN(scale_cap_hi, MAX(scale_cap_lo, scaleL))
 		  pc_eqL(i) = pc_eqL(i) * scaleL
 		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
 		    pc_blk(p,:,:) = scaleL * pc_blk(p,:,:)
+		  END DO
+		END DO
+
+		! 关键修正：行缩放后重算列范数，再做列缩放
+		coln = 0.0_8
+		DO i = 1_8, ncells
+		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+		    j = pc_col_ind(p)
+		    IF (j < 1_8 .OR. j > ncells) CYCLE
+		    CALL BLOCK_INF_NORM5(pc_blk(p,:,:), bnrm)
+		    coln(j) = MAX(coln(j), bnrm)
 		  END DO
 		END DO
 
@@ -9249,13 +9229,15 @@ CONTAINS
 		    j = pc_col_ind(p)
 		    IF (j < 1_8 .OR. j > ncells) CYCLE
 		    scaleR = 1.0_8 / SQRT(MAX(coln(j), tinyv))
+		    scaleR = MIN(scale_cap_hi, MAX(scale_cap_lo, scaleR))
 		    pc_blk(p,:,:) = pc_blk(p,:,:) * scaleR
 		  END DO
 		END DO
 
-		! 累积记录右缩放（近似记录，便于后续需要时反缩放）
+		! 累积记录右缩放
 		DO j = 1_8, ncells
 		  scaleR = 1.0_8 / SQRT(MAX(coln(j), tinyv))
+		  scaleR = MIN(scale_cap_hi, MAX(scale_cap_lo, scaleR))
 		  pc_eqR(j) = pc_eqR(j) * scaleR
 		END DO
 	  END DO
