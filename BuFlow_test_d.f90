@@ -185,7 +185,7 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_div_modes = 3_8
   REAL(kind=8), SAVE :: pc_div_rhs_blend = 0.60d0
   REAL(kind=8), SAVE :: pc_div_mode_vel_gain = 0.08d0
-  LOGICAL, SAVE :: pc_use_schur_split = .TRUE.
+  LOGICAL, SAVE :: pc_use_schur_split = .FALSE.
   INTEGER(kind=8), SAVE :: pc_schur_sweeps = 3_8
   REAL(kind=8), SAVE :: pc_schur_omega = 0.65d0
   REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.30d0
