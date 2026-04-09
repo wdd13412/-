@@ -162,14 +162,14 @@ MODULE BUFLOWMODULE_DIFF
 	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 2_8
 	REAL(kind=8), SAVE :: pc_pschur_diag_eps = 1.0d-10
   ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
-  LOGICAL, SAVE :: pc_use_flux_jacobian = .TRUE.
+  LOGICAL, SAVE :: pc_use_flux_jacobian = .FALSE.
   REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
-  LOGICAL, SAVE :: pc_use_pseudo_time_mass = .TRUE.
+  LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
   ! ===== AM^{-1} one-step defect correction =====
   LOGICAL, SAVE :: pc_use_am1 = .TRUE.
-  REAL(kind=8), SAVE :: pc_am1_omega = 0.50d0
+  REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
 
 	! 压力Schur近似：标量稀疏（沿用cell邻接图）
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
