@@ -166,9 +166,9 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
   ! ===== variable similarity scaling for PC matrix: A_tilde = D^{-1} A D =====
   LOGICAL, SAVE :: pc_use_var_scaling = .FALSE.
-  REAL(kind=8), SAVE :: pc_var_scale_p = 1.0d5
-  REAL(kind=8), SAVE :: pc_var_scale_t = 3.0d2
-  REAL(kind=8), SAVE :: pc_var_scale_u = 2.73d2
+  REAL(kind=8), SAVE :: pc_var_scale_p = 8.0d0
+  REAL(kind=8), SAVE :: pc_var_scale_t = 2.0d0
+  REAL(kind=8), SAVE :: pc_var_scale_u = 1.5d0
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
   REAL(kind=8), SAVE :: pc_mass_auto_beta = 0.08d0
