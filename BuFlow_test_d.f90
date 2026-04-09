@@ -168,17 +168,28 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
   ! ===== AM^{-1} polynomial defect-correction =====
-  LOGICAL, SAVE :: pc_use_am1 = .FALSE.
+  LOGICAL, SAVE :: pc_use_am1 = .TRUE.
   REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
-  LOGICAL, SAVE :: pc_use_am_poly = .TRUE.
+  LOGICAL, SAVE :: pc_use_am_poly = .FALSE.
   INTEGER(kind=8), SAVE :: pc_am_poly_steps = 2_8
   REAL(kind=8), SAVE :: pc_am_poly_omega0 = 0.75d0
   REAL(kind=8), SAVE :: pc_am_poly_omega_decay = 0.85d0
   REAL(kind=8), SAVE :: pc_am_poly_omega_min = 0.20d0
+  ! ===== stronger two-level multiplicative cycle =====
+  INTEGER(kind=8), SAVE :: pc_two_level_cycles = 1_8
+  INTEGER(kind=8), SAVE :: pc_two_level_presmooth = 1_8
+  INTEGER(kind=8), SAVE :: pc_two_level_postsmooth = 1_8
+  REAL(kind=8), SAVE :: pc_two_level_omega = 0.85d0
   ! ===== Gershgorin-like diagonal dominance stabilization =====
   LOGICAL, SAVE :: pc_use_gersh_shift = .FALSE.
   REAL(kind=8), SAVE :: pc_gersh_theta = 0.95d0
   REAL(kind=8), SAVE :: pc_gersh_cap_rel = 0.35d0
+  ! ===== pseudo-transient continuation shift for Krylov operator =====
+  LOGICAL, SAVE :: pc_use_ptc_shift = .FALSE.
+  REAL(kind=8), SAVE :: pc_ptc_alpha = 0.30d0
+  REAL(kind=8), SAVE :: pc_ptc_power = 1.0d0
+  REAL(kind=8), SAVE :: pc_ptc_min_rel = 1.0d-3
+  REAL(kind=8), SAVE :: pc_a0_diag_mean = 1.0_8
 
 	! 压力Schur近似：标量稀疏（沿用cell邻接图）
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
@@ -8079,6 +8090,7 @@ CONTAINS
 	  REAL(kind=8) :: delta_w_norm, r_old_norm
 	  REAL(kind=8) :: Hy_norm, hy_i
 	  REAL(kind=8) :: v1_norm_dbg, Av1_norm_dbg, h11_dbg, h21_dbg, dot12_dbg, v2_norm_dbg
+	  REAL(kind=8) :: sigma_ptc, sigma_rel
 
 	  INTRINSIC SQRT, ABS, SUM, MIN
 
@@ -8175,6 +8187,12 @@ CONTAINS
 		  eta_prev = eta_k
 		END IF
 		tol_b_k = eta_k * bnrm
+		sigma_ptc = 0.0_8
+		IF (pc_use_ptc_shift .AND. pc_a0_ready) THEN
+		  sigma_rel = MAX(pc_ptc_min_rel, (rnrm_true / MAX(1.0d-300, bnrm))**pc_ptc_power)
+		  sigma_ptc = pc_ptc_alpha * pc_a0_diag_mean * sigma_rel
+		END IF
+		PRINT *, '[GMRES-DBG] outer=', k, ' sigma_ptc=', sigma_ptc, ' diag_mean=', pc_a0_diag_mean
 
 		! 本輪 Krylov 的起始：beta = ||r||，v1 = r/||r||
 		beta_kry = rnrm_true
@@ -8209,6 +8227,7 @@ CONTAINS
 		  END IF
 		  ! w = A * z ，matrix-free；A 對應 dR/dw 在當前線性化點
 		  CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, z, w)
+		  IF (sigma_ptc > 0.0_8) w(1:n) = w(1:n) + sigma_ptc * z(1:n)
 		  !!!!!!!!!正则化，待删/缺乏一个反回归
 !		  w(1:n) = w(1:n) + eps_reg * z(1:n)   ! (A + eps I) z
 		  !!!!!!!!!!
@@ -8347,6 +8366,7 @@ CONTAINS
         ! delta_x = z；檢查 A*delta_x 是否很小
 		r_old_norm = beta_kry   ! 因為你每個 restart 的 rnorm(start) 就是 beta_kry
 		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, z, w)
+		IF (sigma_ptc > 0.0_8) w(1:n) = w(1:n) + sigma_ptc * z(1:n)
 		delta_w_norm = SQRT(SUM(w*w))
 
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||A*delta_x||=', delta_w_norm, &
@@ -8510,6 +8530,8 @@ CONTAINS
 	  INTEGER(kind=8) :: ii, pp, jj, i
 	  REAL(kind=8) :: ndiag, nblk, tinyv, drop_th, dropped_sum, compv
 	  REAL(kind=8) :: offsum, shiftv
+	  REAL(kind=8) :: diag_sum, diag_nrm
+	  INTEGER(kind=8) :: diag_cnt
 
 	  conv_w = 1.0_8
 	  diff_w = 1.0_8
@@ -8692,7 +8714,7 @@ CONTAINS
 	  END IF
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
 	&         ' pseudo_mass=', pc_use_pseudo_time_mass, ' am_poly=', pc_use_am_poly, &
-	&         ' am1=', pc_use_am1
+	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level
         ! 0) 先保留你已有的对角小正则
 	  !    pc_blk(p,k,k) += 1.0d-10  (已有)
 
@@ -8782,6 +8804,20 @@ CONTAINS
 	  ALLOCATE(pc_a0_blk(SIZE(pc_blk,1), 5, 5))
 	  pc_a0_blk = pc_blk
 	  pc_a0_ready = .TRUE.
+	  diag_sum = 0.0_8
+	  diag_cnt = 0_8
+	  DO c = 1_8, ncells
+		p = pc_diag_pos(c)
+		IF (p <= 0_8) CYCLE
+		CALL BLOCK_INF_NORM5(pc_a0_blk(p,:,:), diag_nrm)
+		diag_sum = diag_sum + diag_nrm
+		diag_cnt = diag_cnt + 1_8
+	  END DO
+	  IF (diag_cnt > 0_8) THEN
+		pc_a0_diag_mean = diag_sum / REAL(diag_cnt, kind=8)
+	  ELSE
+		pc_a0_diag_mean = 1.0_8
+	  END IF
 	  PRINT *, '[PC-A0] backup ready, nnzb=', SIZE(pc_a0_blk,1) 
 	  CALL FACTOR_BLOCK_ILU0(ncells, ok)
 	    IF (.NOT. ok) THEN
@@ -9731,6 +9767,44 @@ SUBROUTINE PC_APPLY_ILU_CORE(vec_in, vec_out)
 
   DEALLOCATE(y)
 END SUBROUTINE PC_APPLY_ILU_CORE
+SUBROUTINE PC_APPLY_TWO_LEVEL_MULT(ncells, rhs_in, z_io)
+  IMPLICIT NONE
+  INTEGER(kind=8), INTENT(IN) :: ncells
+  REAL(kind=8), INTENT(IN) :: rhs_in(:)
+  REAL(kind=8), INTENT(INOUT) :: z_io(:)
+  INTEGER(kind=8) :: cyc, s
+  REAL(kind=8), ALLOCATABLE :: res(:), dz(:), ec(:), Az(:)
+
+  IF (.NOT. pc_use_two_level) RETURN
+  IF (.NOT. pc_coarse_ready) RETURN
+
+  ALLOCATE(res(ncells*5), dz(ncells*5), ec(ncells*5), Az(ncells*5))
+  DO cyc = 1_8, MAX(1_8, pc_two_level_cycles)
+    CALL PC_APPLY_A0(ncells, z_io, Az)
+    res = rhs_in - Az
+
+    DO s = 1_8, MAX(0_8, pc_two_level_presmooth)
+      CALL PC_APPLY_ILU_CORE(res, dz)
+      z_io = z_io + pc_two_level_omega * dz
+      CALL PC_APPLY_A0(ncells, z_io, Az)
+      res = rhs_in - Az
+    END DO
+
+    ec = 0.0_8
+    CALL PC_COARSE_CORRECT_AGG(ncells, res, ec)
+    z_io = z_io + ec
+    CALL PC_APPLY_A0(ncells, z_io, Az)
+    res = rhs_in - Az
+
+    DO s = 1_8, MAX(0_8, pc_two_level_postsmooth)
+      CALL PC_APPLY_ILU_CORE(res, dz)
+      z_io = z_io + pc_two_level_omega * dz
+      CALL PC_APPLY_A0(ncells, z_io, Az)
+      res = rhs_in - Az
+    END DO
+  END DO
+  DEALLOCATE(res, dz, ec, Az)
+END SUBROUTINE PC_APPLY_TWO_LEVEL_MULT
 SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
   IMPLICIT NONE
   REAL(kind=8), INTENT(IN)  :: vec_in(:)
@@ -9772,6 +9846,8 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
     DEALLOCATE(Az, rr, ecorr)
   END IF
 
+  CALL PC_APPLY_TWO_LEVEL_MULT(ncells, vec_in, vec_out)
+
   IF (pc_use_pschur .AND. pc_sp_ready) THEN
     ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
     CALL PC_APPLY_A0(ncells, vec_out, Az)
@@ -9782,14 +9858,6 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
     DEALLOCATE(Az, rr, ecorr)
   END IF
 
-  IF (pc_use_two_level .AND. pc_coarse_ready) THEN
-    ALLOCATE(Az2(ncells*5), rr2(ncells*5), ecorr2(ncells*5))
-    CALL PC_APPLY_A0(ncells, vec_out, Az2)
-    rr2 = vec_in - Az2
-    CALL PC_COARSE_CORRECT_AGG(ncells, rr2, ecorr2)
-    vec_out = vec_out + ecorr2
-    DEALLOCATE(Az2, rr2, ecorr2)
-  END IF
 END SUBROUTINE APPLY_PC_INV
 	
 	INTEGER(kind=8) FUNCTION FIND_BLOCK_POS(irow, jcol)
