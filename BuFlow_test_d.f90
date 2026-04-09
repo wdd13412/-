@@ -185,8 +185,13 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_div_modes = 3_8
   REAL(kind=8), SAVE :: pc_div_rhs_blend = 0.60d0
   REAL(kind=8), SAVE :: pc_div_mode_vel_gain = 0.08d0
+  LOGICAL, SAVE :: pc_use_schur_split = .TRUE.
+  INTEGER(kind=8), SAVE :: pc_schur_sweeps = 3_8
+  REAL(kind=8), SAVE :: pc_schur_omega = 0.65d0
+  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.30d0
   REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_div_basis(:, :)   ! (ncells,3), 低频散度模态基
+  REAL(kind=8), ALLOCATABLE, SAVE :: pc_duu_inv(:, :, :)  ! (ncells,4,4), momentum/energy block inverse
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac_p(:,:), pc_Ac_p_inv(:,:)
   ! ===== Gershgorin-like diagonal dominance stabilization =====
   LOGICAL, SAVE :: pc_use_gersh_shift = .FALSE.
@@ -199,6 +204,13 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_ptc_alpha_min = 0.05d0
   REAL(kind=8), SAVE :: pc_ptc_inc = 1.25d0
   REAL(kind=8), SAVE :: pc_ptc_dec = 0.85d0
+  REAL(kind=8), SAVE :: pc_ptc_outer_damp = 0.65d0
+  REAL(kind=8), SAVE :: pc_ptc_outer_damp_min = 0.20d0
+  REAL(kind=8), SAVE :: pc_ptc_outer_damp_max = 0.95d0
+  REAL(kind=8), SAVE :: pc_ptc_outer_grow = 1.08d0
+  REAL(kind=8), SAVE :: pc_ptc_outer_shrink = 0.82d0
+  REAL(kind=8), SAVE :: pc_ptc_eta_floor = 0.03d0
+  REAL(kind=8), SAVE :: pc_ptc_eta_ceiling = 0.70d0
   REAL(kind=8), SAVE :: pc_ptc_power = 1.0d0
   REAL(kind=8), SAVE :: pc_ptc_min_rel = 1.0d-3
   REAL(kind=8), SAVE :: pc_a0_diag_mean = 1.0_8
@@ -8102,7 +8114,7 @@ CONTAINS
 	  REAL(kind=8) :: delta_w_norm, r_old_norm
 	  REAL(kind=8) :: Hy_norm, hy_i
 	  REAL(kind=8) :: v1_norm_dbg, Av1_norm_dbg, h11_dbg, h21_dbg, dot12_dbg, v2_norm_dbg
-	  REAL(kind=8) :: sigma_ptc, sigma_rel, rnrm_prev_outer, outer_ratio
+	  REAL(kind=8) :: sigma_ptc, sigma_rel, rnrm_prev_outer, outer_ratio, ptc_step_omega, outer_ratio_eta
 
 	  INTRINSIC SQRT, ABS, SUM, MIN
 
@@ -8184,13 +8196,24 @@ CONTAINS
 		RETURN
 	  END IF
 	  rnrm_prev_outer = rnrm_true
+	  ptc_step_omega = 1.0_8
+	  IF (pc_use_ptc_shift) ptc_step_omega = MIN(pc_ptc_outer_damp_max, MAX(pc_ptc_outer_damp_min, pc_ptc_outer_damp))
 
 	  ! ===================== 外層 restart =====================
 	  DO k = 1, maxiter
 	    IF (k == 1_8) THEN
-		  eta_k = eta_prev
+		  IF (pc_use_ptc_shift) THEN
+		    eta_k = pc_ptc_eta_ceiling
+		  ELSE
+		    eta_k = eta_prev
+		  END IF
 		ELSE
-		  eta_k = MAX(0.2_8, 0.5_8 * eta_prev**phi_exp)
+		  IF (pc_use_ptc_shift) THEN
+		    outer_ratio_eta = rnrm_true / MAX(1.0d-300, rnrm_prev_outer)
+		    eta_k = MIN(pc_ptc_eta_ceiling, MAX(pc_ptc_eta_floor, 0.70_8 * outer_ratio_eta**1.2_8))
+		  ELSE
+		    eta_k = MAX(0.2_8, 0.5_8 * eta_prev**phi_exp)
+		  END IF
 		  PRINT *, '[GMRES-DBG] outer=', k, ' eta_k=', eta_k, &
 &        ' beta_kry=', beta_kry, ' res_ls=', res_ls, &
 &        ' res_ls/(eta_k*beta)=', res_ls / MAX(1.0d-300, eta_k*beta_kry)
@@ -8207,13 +8230,16 @@ CONTAINS
 		    outer_ratio = rnrm_true / MAX(1.0d-300, rnrm_prev_outer)
 		    IF (outer_ratio > 0.97_8) THEN
 		      pc_ptc_alpha = MIN(pc_ptc_alpha_max, pc_ptc_alpha * pc_ptc_inc)
+		      ptc_step_omega = MAX(pc_ptc_outer_damp_min, ptc_step_omega * pc_ptc_outer_shrink)
 		    ELSEIF (outer_ratio < 0.70_8) THEN
 		      pc_ptc_alpha = MAX(pc_ptc_alpha_min, pc_ptc_alpha * pc_ptc_dec)
+		      ptc_step_omega = MIN(pc_ptc_outer_damp_max, ptc_step_omega * pc_ptc_outer_grow)
 		    END IF
 		  END IF
 		  sigma_rel = MAX(pc_ptc_min_rel, (rnrm_true / MAX(1.0d-300, bnrm))**pc_ptc_power)
 		  sigma_ptc = pc_ptc_alpha * pc_a0_diag_mean * sigma_rel
-		  PRINT *, '[PTC-ADAPT] outer=', k, ' ratio=', outer_ratio, ' alpha=', pc_ptc_alpha, ' sigma=', sigma_ptc
+		  PRINT *, '[PTC-ADAPT] outer=', k, ' ratio=', outer_ratio, ' alpha=', pc_ptc_alpha, &
+		  &       ' sigma=', sigma_ptc, ' omega=', ptc_step_omega, ' eta=', eta_k
 		END IF
 		PRINT *, '[GMRES-DBG] outer=', k, ' sigma_ptc=', sigma_ptc, ' diag_mean=', pc_a0_diag_mean
 
@@ -8394,7 +8420,7 @@ CONTAINS
 
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||A*delta_x||=', delta_w_norm, &
 		&         ' ||r_old||=', r_old_norm, ' ratio=', delta_w_norm/ MAX(1.0d-300, r_old_norm)
-		x(1:n) = x(1:n) + z(1:n)
+		x(1:n) = x(1:n) + ptc_step_omega * z(1:n)
 		xnrm_new = SQRT(SUM(x(1:n)*x(1:n)))
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||x_new||=', xnrm_new
 
@@ -8405,6 +8431,7 @@ CONTAINS
 		!!!!!
 		r = b - w
 		rnrm_true = SQRT(SUM(r*r))
+		rnrm_prev_outer = rnrm_true
 		PRINT *, '  [GMRES] outer=', k, ' true||r||=', rnrm_true, &
 &      ' true||r||/||b||=', rnrm_true/bnrm, ' eta_k=', eta_k, &
 &      ' converged=', (rnrm_true <= tol_b)
@@ -8853,10 +8880,15 @@ CONTAINS
 		ELSE
 		  pc_ncells = ncells
 		  pc_ready = .TRUE.
-		  IF (pc_use_pschur) THEN
+		  IF (pc_use_pschur .OR. pc_use_schur_split) THEN
 			CALL PC_BUILD_PRESSURE_SCHUR_STRONG(ncells)
 		  ELSE
 			pc_sp_ready = .FALSE.
+		  END IF
+		  IF (pc_use_schur_split .AND. pc_sp_ready) THEN
+			CALL PC_BUILD_SCHUR_SPLIT_DATA(ncells)
+		  ELSE
+			IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
 		  END IF
 		END IF
 		IF (pc_ready .AND. pc_use_two_level) THEN
@@ -9955,6 +9987,144 @@ CONTAINS
 
       DEALLOCATE(rc, ec)
     END SUBROUTINE PC_COARSE_CORRECT_PV_SCHUR
+    SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA(ncells)
+      IMPLICIT NONE
+      INTEGER(kind=8), INTENT(IN) :: ncells
+      INTEGER(kind=8) :: i, pd
+      REAL(kind=8) :: epsd
+      REAL(kind=8) :: Auu4(4,4)
+      LOGICAL :: ok4
+
+      epsd = MAX(1.0d-30, pc_pschur_diag_eps)
+      IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
+      ALLOCATE(pc_duu_inv(ncells,4,4))
+      pc_duu_inv = 0.0_8
+
+      DO i = 1_8, ncells
+        pd = pc_diag_pos(i)
+        IF (pd <= 0_8) THEN
+          pc_duu_inv(i,1,1) = 1.0_8 / epsd
+          pc_duu_inv(i,2,2) = 1.0_8 / epsd
+          pc_duu_inv(i,3,3) = 1.0_8 / epsd
+          pc_duu_inv(i,4,4) = 1.0_8 / epsd
+          CYCLE
+        END IF
+        IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+          Auu4(1,1) = pc_a0_blk(pd,2,2); Auu4(1,2) = pc_a0_blk(pd,2,3); Auu4(1,3) = pc_a0_blk(pd,2,4); Auu4(1,4) = pc_a0_blk(pd,2,5)
+          Auu4(2,1) = pc_a0_blk(pd,3,2); Auu4(2,2) = pc_a0_blk(pd,3,3); Auu4(2,3) = pc_a0_blk(pd,3,4); Auu4(2,4) = pc_a0_blk(pd,3,5)
+          Auu4(3,1) = pc_a0_blk(pd,4,2); Auu4(3,2) = pc_a0_blk(pd,4,3); Auu4(3,3) = pc_a0_blk(pd,4,4); Auu4(3,4) = pc_a0_blk(pd,4,5)
+          Auu4(4,1) = pc_a0_blk(pd,5,2); Auu4(4,2) = pc_a0_blk(pd,5,3); Auu4(4,3) = pc_a0_blk(pd,5,4); Auu4(4,4) = pc_a0_blk(pd,5,5)
+        ELSE
+          Auu4(1,1) = pc_blk(pd,2,2); Auu4(1,2) = pc_blk(pd,2,3); Auu4(1,3) = pc_blk(pd,2,4); Auu4(1,4) = pc_blk(pd,2,5)
+          Auu4(2,1) = pc_blk(pd,3,2); Auu4(2,2) = pc_blk(pd,3,3); Auu4(2,3) = pc_blk(pd,3,4); Auu4(2,4) = pc_blk(pd,3,5)
+          Auu4(3,1) = pc_blk(pd,4,2); Auu4(3,2) = pc_blk(pd,4,3); Auu4(3,3) = pc_blk(pd,4,4); Auu4(3,4) = pc_blk(pd,4,5)
+          Auu4(4,1) = pc_blk(pd,5,2); Auu4(4,2) = pc_blk(pd,5,3); Auu4(4,3) = pc_blk(pd,5,4); Auu4(4,4) = pc_blk(pd,5,5)
+        END IF
+        CALL INVERT_DENSE(Auu4, pc_duu_inv(i,:,:), ok4)
+        IF (.NOT. ok4) THEN
+          pc_duu_inv(i,:,:) = 0.0_8
+          pc_duu_inv(i,1,1) = 1.0_8 / MAX(ABS(Auu4(1,1)), epsd)
+          pc_duu_inv(i,2,2) = 1.0_8 / MAX(ABS(Auu4(2,2)), epsd)
+          pc_duu_inv(i,3,3) = 1.0_8 / MAX(ABS(Auu4(3,3)), epsd)
+          pc_duu_inv(i,4,4) = 1.0_8 / MAX(ABS(Auu4(4,4)), epsd)
+        END IF
+      END DO
+      PRINT *, '[PC-SCHUR] split data ready.'
+    END SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA
+    SUBROUTINE PC_APPLY_SCHUR_SPLIT(ncells, rhs_in, z_out)
+      IMPLICIT NONE
+      INTEGER(kind=8), INTENT(IN) :: ncells
+      REAL(kind=8), INTENT(IN) :: rhs_in(:)
+      REAL(kind=8), INTENT(OUT) :: z_out(:)
+      INTEGER(kind=8) :: i, j, p, it
+      REAL(kind=8), ALLOCATABLE :: dp(:), dp_old(:), rp_tilde(:)
+      REAL(kind=8), ALLOCATABLE :: du_pred(:, :)
+      REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), dz(:)
+      REAL(kind=8) :: rhs_s, tinyv
+      REAL(kind=8) :: apu(4), aup(4), sum4(4), du4(4)
+
+      z_out = 0.0_8
+      IF (.NOT. pc_sp_ready) RETURN
+      IF (.NOT. ALLOCATED(pc_sp_diag) .OR. .NOT. ALLOCATED(pc_sp_off)) RETURN
+      IF (.NOT. ALLOCATED(pc_duu_inv)) RETURN
+
+      tinyv = MAX(1.0d-30, pc_pschur_diag_eps)
+      ALLOCATE(dp(ncells), dp_old(ncells), rp_tilde(ncells), du_pred(ncells,4))
+      dp = 0.0_8
+      dp_old = 0.0_8
+      rp_tilde = 0.0_8
+      du_pred = 0.0_8
+
+      DO i = 1_8, ncells
+        du4(1) = rhs_in((i-1_8)*5_8 + 2_8)
+        du4(2) = rhs_in((i-1_8)*5_8 + 3_8)
+        du4(3) = rhs_in((i-1_8)*5_8 + 4_8)
+        du4(4) = rhs_in((i-1_8)*5_8 + 5_8)
+        du_pred(i,:) = MATMUL(pc_duu_inv(i,:,:), du4)
+      END DO
+
+      DO i = 1_8, ncells
+        rp_tilde(i) = rhs_in((i-1_8)*5_8 + 1_8)
+        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+          j = pc_col_ind(p)
+          IF (j < 1_8 .OR. j > ncells) CYCLE
+          IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+            apu(1) = pc_a0_blk(p,1,2); apu(2) = pc_a0_blk(p,1,3); apu(3) = pc_a0_blk(p,1,4); apu(4) = pc_a0_blk(p,1,5)
+          ELSE
+            apu(1) = pc_blk(p,1,2); apu(2) = pc_blk(p,1,3); apu(3) = pc_blk(p,1,4); apu(4) = pc_blk(p,1,5)
+          END IF
+          rp_tilde(i) = rp_tilde(i) - DOT_PRODUCT(apu, du_pred(j,:))
+        END DO
+      END DO
+
+      DO it = 1_8, MAX(1_8, pc_schur_sweeps)
+        dp_old = dp
+        DO i = 1_8, ncells
+          rhs_s = rp_tilde(i)
+          DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+            j = pc_col_ind(p)
+            IF (j == i) CYCLE
+            rhs_s = rhs_s - pc_sp_off(p) * dp_old(j)
+          END DO
+          dp(i) = (1.0_8 - pc_schur_omega) * dp_old(i) + pc_schur_omega * &
+          & rhs_s / SIGN(MAX(ABS(pc_sp_diag(i)), tinyv), pc_sp_diag(i))
+        END DO
+      END DO
+
+      DO i = 1_8, ncells
+        z_out((i-1_8)*5_8 + 1_8) = dp(i)
+      END DO
+
+      DO i = 1_8, ncells
+        sum4 = 0.0_8
+        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+          j = pc_col_ind(p)
+          IF (j < 1_8 .OR. j > ncells) CYCLE
+          IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+            aup(1) = pc_a0_blk(p,2,1); aup(2) = pc_a0_blk(p,3,1); aup(3) = pc_a0_blk(p,4,1); aup(4) = pc_a0_blk(p,5,1)
+          ELSE
+            aup(1) = pc_blk(p,2,1); aup(2) = pc_blk(p,3,1); aup(3) = pc_blk(p,4,1); aup(4) = pc_blk(p,5,1)
+          END IF
+          sum4 = sum4 + aup * dp(j)
+        END DO
+        du4 = du_pred(i,:) - MATMUL(pc_duu_inv(i,:,:), sum4)
+        z_out((i-1_8)*5_8 + 2_8) = du4(1)
+        z_out((i-1_8)*5_8 + 3_8) = du4(2)
+        z_out((i-1_8)*5_8 + 4_8) = du4(3)
+        z_out((i-1_8)*5_8 + 5_8) = du4(4)
+      END DO
+
+      IF (pc_schur_post_ilu > 0.0_8 .AND. pc_a0_ready) THEN
+        ALLOCATE(Az(ncells*5), rr(ncells*5), dz(ncells*5))
+        CALL PC_APPLY_A0(ncells, z_out, Az)
+        rr = rhs_in - Az
+        CALL PC_APPLY_ILU_CORE(rr, dz)
+        z_out = z_out + pc_schur_post_ilu * dz
+        DEALLOCATE(Az, rr, dz)
+      END IF
+
+      DEALLOCATE(dp, dp_old, rp_tilde, du_pred)
+    END SUBROUTINE PC_APPLY_SCHUR_SPLIT
 SUBROUTINE PC_APPLY_ILU_CORE(vec_in, vec_out)
   IMPLICIT NONE
   REAL(kind=8), INTENT(IN)  :: vec_in(:)
@@ -10094,7 +10264,11 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
     RETURN
   END IF
 
-  CALL PC_APPLY_ILU_CORE(vec_in, vec_out)
+  IF (pc_use_schur_split .AND. pc_sp_ready .AND. ALLOCATED(pc_duu_inv)) THEN
+    CALL PC_APPLY_SCHUR_SPLIT(ncells, vec_in, vec_out)
+  ELSE
+    CALL PC_APPLY_ILU_CORE(vec_in, vec_out)
+  END IF
   ! AM^{-1} polynomial defect-correction (multi-step Richardson on preconditioned residual)
   IF (pc_use_am_poly .AND. pc_a0_ready) THEN
     ALLOCATE(rr_poly(ncells*5), dz(ncells*5), Az_poly(ncells*5))
@@ -10118,9 +10292,9 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
     DEALLOCATE(Az, rr, ecorr)
   END IF
 
-  CALL PC_APPLY_TWO_LEVEL_MULT(ncells, vec_in, vec_out)
+  IF (.NOT. pc_use_schur_split) CALL PC_APPLY_TWO_LEVEL_MULT(ncells, vec_in, vec_out)
 
-  IF (pc_use_pschur .AND. pc_sp_ready) THEN
+  IF ((.NOT. pc_use_schur_split) .AND. pc_use_pschur .AND. pc_sp_ready) THEN
     ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
     CALL PC_APPLY_A0(ncells, vec_out, Az)
     rr = vec_in - Az
