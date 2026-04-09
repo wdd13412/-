@@ -4,7 +4,6 @@
 MODULE MAIN_MODULE_DIFF
   USE BUFLOWMODULE_DIFF
   USE MESHDEFORMATIONN_DIFF
-  use PETSC_KSP_WRAPPER
 !!!!!!!!!!      
 !!!!!!!!!!	 
   IMPLICIT NONE
@@ -352,7 +351,7 @@ CONTAINS
 								  x_tan = 0.0_8
 
 								  !无雅可比矩阵GMRES方法(正向自动微分求解矩阵向量积)求解dw/dx
-								  CALL SOLVE_TANGENT_PETSC(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+								  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
 								  !x_tan表示的是一个变形参数的dw/dx,维度为（ncells*5）,dwdx表示的是四个变形参数的dw/dx，维度为（ncells*5，4）
 								  dwdx(1:n, i_param) = x_tan
 								  PRINT *, 'Tangent param ', i_param, ' GMRES info=', info

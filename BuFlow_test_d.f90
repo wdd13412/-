@@ -132,7 +132,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_dc(:, :)   ! (ncells,5) 列缩放
     ! === PC 鲁棒增强开关 ===
   LOGICAL, SAVE :: pc_use_equil = .TRUE.          ! 块缩放
-  LOGICAL, SAVE :: pc_use_offdiag_drop = .TRUE.   ! 非对角门限裁剪
+  LOGICAL, SAVE :: pc_use_offdiag_drop = .FALSE.   ! 非对角门限裁剪
   INTEGER(kind=8), SAVE :: pc_equil_iters = 2_8   ! Ruiz迭代次数(1~3)
   REAL(kind=8), SAVE :: pc_drop_rel = 1.0d-3 !1.0d-3      ! 非对角相对阈值
   REAL(kind=8), SAVE :: pc_offdiag_cap = 5.0d0    ! 非对角块范数上限倍数(相对对角)
@@ -155,21 +155,21 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_nc = 0_8
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_agg_id(:)      ! size ncells, 1..pc_nagg
   ! ===== ILU ordering: RCM (apply in factor/solve traversal) =====
-  LOGICAL, SAVE :: pc_use_rcm_order = .FALSE.
+  LOGICAL, SAVE :: pc_use_rcm_order = .TRUE.
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:), pc_iperm(:)
   LOGICAL, SAVE :: pc_use_targeted_boost = .FALSE.
-  LOGICAL, SAVE :: pc_use_pschur = .TRUE.
+  LOGICAL, SAVE :: pc_use_pschur = .FALSE.
 	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 2_8
 	REAL(kind=8), SAVE :: pc_pschur_diag_eps = 1.0d-10
   ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
   LOGICAL, SAVE :: pc_use_flux_jacobian = .TRUE.
-  REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
+  REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.72d0
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .TRUE.
-  REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
+  REAL(kind=8), SAVE :: pc_mass_cfl = 0.80d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
   ! ===== AM^{-1} one-step defect correction =====
   LOGICAL, SAVE :: pc_use_am1 = .TRUE.
-  REAL(kind=8), SAVE :: pc_am1_omega = 0.50d0
+  REAL(kind=8), SAVE :: pc_am1_omega = 0.35d0
 
 	! 压力Schur近似：标量稀疏（沿用cell邻接图）
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
@@ -464,7 +464,7 @@ CONTAINS
 ! 已知初始时间步
     initdt = 0.0000001
 !36.5       ! 已知总仿真时间!!!!!
-    endtime = 800
+    endtime = 600
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -4879,6 +4879,8 @@ CONTAINS
     INTEGER(kind=8) :: bnameline, bnfacesline, bstartfaceline, pos
 !        character(len=256), allocatable :: bLines(:)
     CHARACTER(len=256) :: linestr, dummy
+    LOGICAL :: parse_ok
+    INTEGER(kind=8) :: parsed_i8
     INTRINSIC ADJUSTL
     INTRINSIC TRIM
     INTRINSIC INDEX
@@ -4916,11 +4918,21 @@ CONTAINS
           bnfacesline = FINDINLINES('nFaces', blines, startline)
           pos = INDEX(blines(bnfacesline), 'nFaces') + 6
           PRINT*, 'A1'
-          READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
+          CALL PARSE_FIRST_INT(blines(bnfacesline)(pos:), parsed_i8, parse_ok)
+          IF (parse_ok) THEN
+            boundarynumfacess(i) = parsed_i8
+          ELSE
+            READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
+          END IF
           PRINT*, 'A2'
           bstartfaceline = FINDINLINES('startFace', blines, startline)
           pos = INDEX(blines(bstartfaceline), 'startFace') + 9
-          READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
+          CALL PARSE_FIRST_INT(blines(bstartfaceline)(pos:), parsed_i8, parse_ok)
+          IF (parse_ok) THEN
+            boundarystartfacess(i) = parsed_i8
+          ELSE
+            READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
+          END IF
           boundarystartfacess(i) = boundarystartfacess(i) + 1
 !boundaryEndFaces(i) = boundaryStartFacess(i) + boundaryNumFacess(i) - 1
           startline = FINDINLINES('}', blines, startline) + 1
@@ -4994,6 +5006,48 @@ CONTAINS
     READ(str, *, iostat=iostat) num
     IF (iostat .EQ. 0) isnumber = .true.
   END FUNCTION ISNUMBER
+
+  SUBROUTINE PARSE_FIRST_INT(str, val, ok)
+    IMPLICIT NONE
+    CHARACTER(len=*), INTENT(IN) :: str
+    INTEGER(kind=8), INTENT(OUT) :: val
+    LOGICAL, INTENT(OUT) :: ok
+    INTEGER(kind=8) :: i, j, n, ios, signv
+    CHARACTER(len=256) :: token
+
+    ok = .FALSE.
+    val = 0_8
+    token = ''
+    n = LEN_TRIM(str)
+    IF (n <= 0_8) RETURN
+
+    i = 1_8
+    DO WHILE (i <= n)
+      IF (str(i:i) == '-' .OR. (str(i:i) >= '0' .AND. str(i:i) <= '9')) EXIT
+      i = i + 1_8
+    END DO
+    IF (i > n) RETURN
+
+    signv = 1_8
+    IF (str(i:i) == '-') THEN
+      signv = -1_8
+      i = i + 1_8
+      IF (i > n) RETURN
+    END IF
+
+    j = i
+    DO WHILE (j <= n)
+      IF (.NOT.(str(j:j) >= '0' .AND. str(j:j) <= '9')) EXIT
+      j = j + 1_8
+    END DO
+    IF (j <= i) RETURN
+
+    token = str(i:j-1_8)
+    READ(token, *, IOSTAT=ios) val
+    IF (ios /= 0) RETURN
+    val = signv * val
+    ok = .TRUE.
+  END SUBROUTINE PARSE_FIRST_INT
 
 ! 辅助函数：查找包含子串的行
   INTEGER(kind=8) FUNCTION FINDINLINES(substr, lines, startline)
