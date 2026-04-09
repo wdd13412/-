@@ -168,7 +168,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
   ! ===== AM^{-1} polynomial defect-correction =====
-  LOGICAL, SAVE :: pc_use_am1 = .FALSE.
+  LOGICAL, SAVE :: pc_use_am1 = .TRUE.
   REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
   LOGICAL, SAVE :: pc_use_am_poly = .FALSE.
   INTEGER(kind=8), SAVE :: pc_am_poly_steps = 2_8
@@ -185,10 +185,10 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_div_modes = 3_8
   REAL(kind=8), SAVE :: pc_div_rhs_blend = 0.60d0
   REAL(kind=8), SAVE :: pc_div_mode_vel_gain = 0.08d0
-  LOGICAL, SAVE :: pc_use_schur_split = .TRUE.
-  INTEGER(kind=8), SAVE :: pc_schur_sweeps = 6_8
-  REAL(kind=8), SAVE :: pc_schur_omega = 0.85d0
-  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.10d0
+  LOGICAL, SAVE :: pc_use_schur_split = .FALSE.
+  INTEGER(kind=8), SAVE :: pc_schur_sweeps = 3_8
+  REAL(kind=8), SAVE :: pc_schur_omega = 0.65d0
+  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.30d0
   REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_div_basis(:, :)   ! (ncells,3), 低频散度模态基
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_duu_inv(:, :, :)  ! (ncells,4,4), momentum/energy block inverse
