@@ -181,7 +181,12 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_two_level_postsmooth = 1_8
   REAL(kind=8), SAVE :: pc_two_level_omega = 0.85d0
   LOGICAL, SAVE :: pc_use_coarse_pv_schur = .TRUE.
+  LOGICAL, SAVE :: pc_use_coarse_div_mode = .FALSE.
+  INTEGER(kind=8), SAVE :: pc_div_modes = 3_8
+  REAL(kind=8), SAVE :: pc_div_rhs_blend = 0.60d0
+  REAL(kind=8), SAVE :: pc_div_mode_vel_gain = 0.08d0
   REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
+  REAL(kind=8), ALLOCATABLE, SAVE :: pc_div_basis(:, :)   ! (ncells,3), 低频散度模态基
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac_p(:,:), pc_Ac_p_inv(:,:)
   ! ===== Gershgorin-like diagonal dominance stabilization =====
   LOGICAL, SAVE :: pc_use_gersh_shift = .FALSE.
@@ -190,6 +195,10 @@ MODULE BUFLOWMODULE_DIFF
   ! ===== pseudo-transient continuation shift for Krylov operator =====
   LOGICAL, SAVE :: pc_use_ptc_shift = .FALSE.
   REAL(kind=8), SAVE :: pc_ptc_alpha = 0.30d0
+  REAL(kind=8), SAVE :: pc_ptc_alpha_max = 1.20d0
+  REAL(kind=8), SAVE :: pc_ptc_alpha_min = 0.05d0
+  REAL(kind=8), SAVE :: pc_ptc_inc = 1.25d0
+  REAL(kind=8), SAVE :: pc_ptc_dec = 0.85d0
   REAL(kind=8), SAVE :: pc_ptc_power = 1.0d0
   REAL(kind=8), SAVE :: pc_ptc_min_rel = 1.0d-3
   REAL(kind=8), SAVE :: pc_a0_diag_mean = 1.0_8
@@ -8093,7 +8102,7 @@ CONTAINS
 	  REAL(kind=8) :: delta_w_norm, r_old_norm
 	  REAL(kind=8) :: Hy_norm, hy_i
 	  REAL(kind=8) :: v1_norm_dbg, Av1_norm_dbg, h11_dbg, h21_dbg, dot12_dbg, v2_norm_dbg
-	  REAL(kind=8) :: sigma_ptc, sigma_rel
+	  REAL(kind=8) :: sigma_ptc, sigma_rel, rnrm_prev_outer, outer_ratio
 
 	  INTRINSIC SQRT, ABS, SUM, MIN
 
@@ -8174,6 +8183,7 @@ CONTAINS
 		DEALLOCATE(r, v, w, h, y, z, tmp)
 		RETURN
 	  END IF
+	  rnrm_prev_outer = rnrm_true
 
 	  ! ===================== 外層 restart =====================
 	  DO k = 1, maxiter
@@ -8191,9 +8201,19 @@ CONTAINS
 		END IF
 		tol_b_k = eta_k * bnrm
 		sigma_ptc = 0.0_8
+		outer_ratio = 1.0_8
 		IF (pc_use_ptc_shift .AND. pc_a0_ready) THEN
+		  IF (k > 1_8) THEN
+		    outer_ratio = rnrm_true / MAX(1.0d-300, rnrm_prev_outer)
+		    IF (outer_ratio > 0.97_8) THEN
+		      pc_ptc_alpha = MIN(pc_ptc_alpha_max, pc_ptc_alpha * pc_ptc_inc)
+		    ELSEIF (outer_ratio < 0.70_8) THEN
+		      pc_ptc_alpha = MAX(pc_ptc_alpha_min, pc_ptc_alpha * pc_ptc_dec)
+		    END IF
+		  END IF
 		  sigma_rel = MAX(pc_ptc_min_rel, (rnrm_true / MAX(1.0d-300, bnrm))**pc_ptc_power)
 		  sigma_ptc = pc_ptc_alpha * pc_a0_diag_mean * sigma_rel
+		  PRINT *, '[PTC-ADAPT] outer=', k, ' ratio=', outer_ratio, ' alpha=', pc_ptc_alpha, ' sigma=', sigma_ptc
 		END IF
 		PRINT *, '[GMRES-DBG] outer=', k, ' sigma_ptc=', sigma_ptc, ' diag_mean=', pc_a0_diag_mean
 
@@ -9699,8 +9719,9 @@ CONTAINS
     SUBROUTINE PC_BUILD_COARSE_PV_SCHUR(ncells)
       IMPLICIT NONE
       INTEGER(kind=8), INTENT(IN) :: ncells
-      INTEGER(kind=8) :: i, j, p, agi, agj, pd, ncoarse
+      INTEGER(kind=8) :: i, j, p, agi, agj, pd, ncoarse, m
       REAL(kind=8) :: epsd, diag_mean, tr, app, dotv, offsum, target
+      REAL(kind=8) :: xmin, xmax, ymin, ymax, zmin, zmax, dx, dy, dz, xn, yn, zn, xi
       REAL(kind=8) :: Apu_i(4), Aup_j(4), Auu4(4,4), Auu4_inv(4,4), tmp4(4)
       REAL(kind=8) :: sij
       LOGICAL :: ok4, okinv
@@ -9795,6 +9816,43 @@ CONTAINS
         PRINT *, '[PC-2L-PSCHUR] coarse inversion failed, disable coarse correction.'
       END IF
 
+      IF (pc_use_coarse_div_mode) THEN
+        IF (ALLOCATED(pc_div_basis)) DEALLOCATE(pc_div_basis)
+        ALLOCATE(pc_div_basis(ncells, MAX(1_8, pc_div_modes)))
+        pc_div_basis = 0.0_8
+
+        IF (ALLOCATED(ccenters_mesh) .AND. SIZE(ccenters_mesh,1) >= ncells .AND. SIZE(ccenters_mesh,2) >= 3) THEN
+          xmin = MINVAL(ccenters_mesh(1:ncells,1)); xmax = MAXVAL(ccenters_mesh(1:ncells,1))
+          ymin = MINVAL(ccenters_mesh(1:ncells,2)); ymax = MAXVAL(ccenters_mesh(1:ncells,2))
+          zmin = MINVAL(ccenters_mesh(1:ncells,3)); zmax = MAXVAL(ccenters_mesh(1:ncells,3))
+          dx = MAX(xmax-xmin, 1.0d-30); dy = MAX(ymax-ymin, 1.0d-30); dz = MAX(zmax-zmin, 1.0d-30)
+          DO i = 1_8, ncells
+            xn = (ccenters_mesh(i,1) - xmin) / dx
+            yn = (ccenters_mesh(i,2) - ymin) / dy
+            zn = (ccenters_mesh(i,3) - zmin) / dz
+            IF (pc_div_modes >= 1_8) pc_div_basis(i,1) = 2.0_8*xn - 1.0_8
+            IF (pc_div_modes >= 2_8) pc_div_basis(i,2) = 2.0_8*yn - 1.0_8
+            IF (pc_div_modes >= 3_8) pc_div_basis(i,3) = 2.0_8*zn - 1.0_8
+            DO m = 4_8, pc_div_modes
+              pc_div_basis(i,m) = SIN(REAL(m,kind=8) * 3.141592653589793_8 * xn)
+            END DO
+          END DO
+        ELSE
+          DO i = 1_8, ncells
+            xi = REAL(i-1_8,kind=8) / MAX(1.0_8, REAL(ncells-1_8,kind=8))
+            IF (pc_div_modes >= 1_8) pc_div_basis(i,1) = 2.0_8*xi - 1.0_8
+            IF (pc_div_modes >= 2_8) pc_div_basis(i,2) = COS(2.0_8*3.141592653589793_8*xi)
+            IF (pc_div_modes >= 3_8) pc_div_basis(i,3) = SIN(2.0_8*3.141592653589793_8*xi)
+            DO m = 4_8, pc_div_modes
+              pc_div_basis(i,m) = SIN(REAL(m,kind=8) * 3.141592653589793_8 * xi)
+            END DO
+          END DO
+        END IF
+        PRINT *, '[PC-2L-DIV] modes ready=', pc_div_modes
+      ELSE
+        IF (ALLOCATED(pc_div_basis)) DEALLOCATE(pc_div_basis)
+      END IF
+
       IF (ALLOCATED(Ablk)) DEALLOCATE(Ablk)
     END SUBROUTINE PC_BUILD_COARSE_PV_SCHUR
     SUBROUTINE PC_COARSE_CORRECT_PV_SCHUR(ncells, r_in, e_out)
@@ -9802,9 +9860,9 @@ CONTAINS
       INTEGER(kind=8), INTENT(IN) :: ncells
       REAL(kind=8), INTENT(IN) :: r_in(:)
       REAL(kind=8), INTENT(OUT) :: e_out(:)
-      INTEGER(kind=8) :: i, agi, agj, pd, ncoarse
+      INTEGER(kind=8) :: i, agi, agj, pd, ncoarse, m
       REAL(kind=8), ALLOCATABLE :: rc(:), ec(:)
-      REAL(kind=8) :: epsd, dp_i
+      REAL(kind=8) :: epsd, dp_i, numer, denom, amp
       REAL(kind=8) :: Auu4(4,4), Auu4_inv(4,4), Aup_i(4), rhs4(4), du4(4)
       LOGICAL :: ok4
       REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:)
@@ -9837,6 +9895,22 @@ CONTAINS
         agi = pc_agg_id(i)
         e_out((i-1_8)*5_8 + 1_8) = ec(agi)
       END DO
+      IF (pc_use_coarse_div_mode .AND. ALLOCATED(pc_div_basis)) THEN
+        DO m = 1_8, MIN(pc_div_modes, SIZE(pc_div_basis,2))
+          numer = 0.0_8
+          denom = 1.0d-30
+          DO i = 1_8, ncells
+            numer = numer + r_in((i-1_8)*5_8 + 1_8) * pc_div_basis(i,m)
+            denom = denom + pc_div_basis(i,m) * pc_div_basis(i,m)
+          END DO
+          amp = pc_div_rhs_blend * numer / denom
+          DO i = 1_8, ncells
+            e_out((i-1_8)*5_8 + 1_8) = e_out((i-1_8)*5_8 + 1_8) + amp * pc_div_basis(i,m)
+            e_out((i-1_8)*5_8 + 3_8) = e_out((i-1_8)*5_8 + 3_8) + pc_div_mode_vel_gain * amp * pc_div_basis(i,m)
+            e_out((i-1_8)*5_8 + 4_8) = e_out((i-1_8)*5_8 + 4_8) - pc_div_mode_vel_gain * amp * pc_div_basis(i,m)
+          END DO
+        END DO
+      END IF
 
       IF (pc_coarse_pv_vel_relax > 0.0_8 .AND. ALLOCATED(pc_diag_pos)) THEN
         IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
