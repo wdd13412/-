@@ -165,12 +165,12 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_flux_jacobian = .FALSE.
   REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
-  LOGICAL, SAVE :: pc_use_auto_mass_stab = .TRUE.
+  LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
   REAL(kind=8), SAVE :: pc_mass_auto_beta = 0.08d0
   REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
   REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
   LOGICAL, SAVE :: pc_use_pressure_laplace_reg = .TRUE.
-  REAL(kind=8), SAVE :: pc_press_laplace_beta = 0.12d0
+  REAL(kind=8), SAVE :: pc_press_laplace_beta = 0.01d0
   ! ===== AM^{-1} polynomial defect-correction =====
   LOGICAL, SAVE :: pc_use_am1 = .TRUE.
   REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
