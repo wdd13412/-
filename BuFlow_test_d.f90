@@ -147,7 +147,7 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_drop_comp = .FALSE.
   REAL(kind=8), SAVE :: pc_drop_comp_beta = 0.8d0
     ! ===== two-level coarse correction (5 coarse modes: P,T,Ux,Uy,Uz constants) =====
-  LOGICAL, SAVE :: pc_use_two_level = .TRUE.
+  LOGICAL, SAVE :: pc_use_two_level = .FALSE.
   LOGICAL, SAVE :: pc_coarse_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac(:,:), pc_Ac_inv(:,:)
     ! ===== two-level coarse space: 5 x Nagg =====
@@ -169,7 +169,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_var_scale_p = 8.0d0
   REAL(kind=8), SAVE :: pc_var_scale_t = 2.0d0
   REAL(kind=8), SAVE :: pc_var_scale_u = 1.5d0
-  LOGICAL, SAVE :: pc_use_cons_right_transform = .TRUE.
+  LOGICAL, SAVE :: pc_use_cons_right_transform = .FALSE.
   REAL(kind=8), SAVE :: pc_cons_floor = 1.0d-10
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
@@ -179,7 +179,7 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_pressure_laplace_reg = .FALSE.
   REAL(kind=8), SAVE :: pc_press_laplace_beta = 0.01d0
   ! ===== AM^{-1} polynomial defect-correction =====
-  LOGICAL, SAVE :: pc_use_am1 = .TRUE.
+  LOGICAL, SAVE :: pc_use_am1 = .FALSE.
   REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
   LOGICAL, SAVE :: pc_use_am_poly = .FALSE.
   INTEGER(kind=8), SAVE :: pc_am_poly_steps = 2_8
@@ -191,17 +191,19 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_two_level_presmooth = 1_8
   INTEGER(kind=8), SAVE :: pc_two_level_postsmooth = 1_8
   REAL(kind=8), SAVE :: pc_two_level_omega = 0.85d0
-  LOGICAL, SAVE :: pc_use_coarse_pv_schur = .TRUE.
+  LOGICAL, SAVE :: pc_use_coarse_pv_schur = .FALSE.
   LOGICAL, SAVE :: pc_use_coarse_div_mode = .FALSE.
   INTEGER(kind=8), SAVE :: pc_div_modes = 3_8
   REAL(kind=8), SAVE :: pc_div_rhs_blend = 0.60d0
   REAL(kind=8), SAVE :: pc_div_mode_vel_gain = 0.08d0
-  LOGICAL, SAVE :: pc_use_schur_split = .FALSE.
+  LOGICAL, SAVE :: pc_use_schur_split = .TRUE.
   INTEGER(kind=8), SAVE :: pc_schur_sweeps = 3_8
   REAL(kind=8), SAVE :: pc_schur_omega = 0.65d0
   INTEGER(kind=8), SAVE :: pc_schur_u_sweeps = 2_8
   REAL(kind=8), SAVE :: pc_schur_u_omega = 0.80d0
-  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.30d0
+  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.00d0
+  REAL(kind=8), SAVE :: pc_schur_u_diag_boost = 0.00d0
+  REAL(kind=8), SAVE :: pc_schur_diag_couple = 0.00d0
   REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_div_basis(:, :)   ! (ncells,3), 低频散度模态基
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_duu_inv(:, :, :)  ! (ncells,4,4), momentum/energy block inverse
@@ -8818,7 +8820,7 @@ CONTAINS
 		  pc_blk(p,:,:) = pc_blk(p,:,:) + mass_coeff * Jmass_eff
 		END DO
 	  END IF
-      IF (pc_use_coarse_pv_schur) pc_use_two_level = .TRUE.
+      IF (pc_use_coarse_pv_schur .AND. (.NOT. pc_use_schur_split)) pc_use_two_level = .TRUE.
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
 	&         ' var_scaling=', pc_use_var_scaling, ' pseudo_mass=', pc_use_pseudo_time_mass, ' auto_mass=', pc_use_auto_mass_stab, &
     &         ' p_lap=', pc_use_pressure_laplace_reg, ' cons_right=', pc_use_cons_right_transform, ' am_poly=', pc_use_am_poly, &
@@ -10048,15 +10050,17 @@ CONTAINS
     SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA(ncells)
       IMPLICIT NONE
       INTEGER(kind=8), INTENT(IN) :: ncells
-      INTEGER(kind=8) :: i, f, p, pd, ownercell, neighbourcell
+      INTEGER(kind=8) :: i, j, f, p, pd, ownercell, neighbourcell
       REAL(kind=8) :: epsd, area_face, dist_on
-      REAL(kind=8) :: Auu4(4,4)
+      REAL(kind=8) :: Auu4(4,4), Apu4(4), Aup4(4), tmp4(4), sch_diag
       LOGICAL :: ok4
-      REAL(kind=8), ALLOCATABLE :: sp_lap_diag(:), sp_lap_off(:)
+      REAL(kind=8), ALLOCATABLE :: sp_lap_diag(:), sp_lap_off(:), sch_diag_add(:)
 
       epsd = MAX(1.0d-30, pc_pschur_diag_eps)
 
       ! ---- U-block inverse used by split Schur (velocity block approx inverse) ----
+      ALLOCATE(sch_diag_add(ncells))
+      sch_diag_add = 0.0_8
       IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
       ALLOCATE(pc_duu_inv(ncells,4,4))
       pc_duu_inv = 0.0_8
@@ -10081,6 +10085,9 @@ CONTAINS
           Auu4(3,1) = pc_blk(pd,4,2); Auu4(3,2) = pc_blk(pd,4,3); Auu4(3,3) = pc_blk(pd,4,4); Auu4(3,4) = pc_blk(pd,4,5)
           Auu4(4,1) = pc_blk(pd,5,2); Auu4(4,2) = pc_blk(pd,5,3); Auu4(4,3) = pc_blk(pd,5,4); Auu4(4,4) = pc_blk(pd,5,5)
         END IF
+        DO j = 1_8, 4_8
+          Auu4(j,j) = Auu4(j,j) + pc_schur_u_diag_boost * MAX(ABS(Auu4(j,j)), epsd)
+        END DO
         CALL INVERT_DENSE(Auu4, pc_duu_inv(i,:,:), ok4)
         IF (.NOT. ok4) THEN
           pc_duu_inv(i,:,:) = 0.0_8
@@ -10089,6 +10096,29 @@ CONTAINS
           pc_duu_inv(i,3,3) = 1.0_8 / MAX(ABS(Auu4(3,3)), epsd)
           pc_duu_inv(i,4,4) = 1.0_8 / MAX(ABS(Auu4(4,4)), epsd)
         END IF
+        ! Add local Schur diagonal coupling: S_ii += A_pu * U_ii^{-1} * A_up
+        IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
+          Apu4(1) = pc_a0_blk(pd,1,2)
+          Apu4(2) = pc_a0_blk(pd,1,3)
+          Apu4(3) = pc_a0_blk(pd,1,4)
+          Apu4(4) = pc_a0_blk(pd,1,5)
+          Aup4(1) = pc_a0_blk(pd,2,1)
+          Aup4(2) = pc_a0_blk(pd,3,1)
+          Aup4(3) = pc_a0_blk(pd,4,1)
+          Aup4(4) = pc_a0_blk(pd,5,1)
+        ELSE
+          Apu4(1) = pc_blk(pd,1,2)
+          Apu4(2) = pc_blk(pd,1,3)
+          Apu4(3) = pc_blk(pd,1,4)
+          Apu4(4) = pc_blk(pd,1,5)
+          Aup4(1) = pc_blk(pd,2,1)
+          Aup4(2) = pc_blk(pd,3,1)
+          Aup4(3) = pc_blk(pd,4,1)
+          Aup4(4) = pc_blk(pd,5,1)
+        END IF
+        tmp4 = MATMUL(pc_duu_inv(i,:,:), Aup4)
+        sch_diag = DOT_PRODUCT(Apu4, tmp4)
+        IF (sch_diag > 0.0_8) sch_diag_add(i) = pc_schur_diag_couple * sch_diag
       END DO
 
       ! ---- Explicit pressure Laplacian (face geometry) replaces algebraic Sp ----
@@ -10129,10 +10159,32 @@ CONTAINS
         END DO
       END IF
 
+      DO i = 1_8, ncells
+        sp_lap_diag(i) = sp_lap_diag(i) + sch_diag_add(i)
+      END DO
+
+      ! Weakly couple pressure neighbors through local Schur couplings on mesh graph.
+      DO i = 1_8, ncells
+        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+          j = pc_col_ind(p)
+          IF (j == i) CYCLE
+          sp_lap_off(p) = sp_lap_off(p) - 0.10d0 * pc_schur_diag_couple * SQRT(sp_lap_diag(i) * sp_lap_diag(j))
+        END DO
+      END DO
+      DO i = 1_8, ncells
+        sch_diag = 0.0_8
+        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+          j = pc_col_ind(p)
+          IF (j == i) CYCLE
+          sch_diag = sch_diag + ABS(sp_lap_off(p))
+        END DO
+        sp_lap_diag(i) = MAX(sp_lap_diag(i), pc_pschur_diag_eps + sch_diag)
+      END DO
+
       pc_sp_diag = sp_lap_diag
       pc_sp_off = sp_lap_off
       pc_sp_ready = .TRUE.
-      DEALLOCATE(sp_lap_diag, sp_lap_off)
+      DEALLOCATE(sp_lap_diag, sp_lap_off, sch_diag_add)
 
       PRINT *, '[PC-SCHUR] split data ready.'
     END SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA
@@ -10458,7 +10510,7 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
     CALL PC_APPLY_ILU_CORE(vin, vout)
   END IF
   ! AM^{-1} polynomial defect-correction (multi-step Richardson on preconditioned residual)
-  IF (pc_use_am_poly .AND. pc_a0_ready) THEN
+    IF ((.NOT. pc_use_schur_split) .AND. pc_use_am_poly .AND. pc_a0_ready) THEN
     ALLOCATE(rr_poly(ncells*5), dz(ncells*5), Az_poly(ncells*5))
     rr_poly = vin
     vout = 0.0_8
@@ -10471,7 +10523,7 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
       omega_poly = MAX(pc_am_poly_omega_min, omega_poly * pc_am_poly_omega_decay)
     END DO
     DEALLOCATE(rr_poly, dz, Az_poly)
-  ELSEIF (pc_use_am1 .AND. pc_a0_ready) THEN
+    ELSEIF ((.NOT. pc_use_schur_split) .AND. pc_use_am1 .AND. pc_a0_ready) THEN
     ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
     CALL PC_APPLY_A0(ncells, vout, Az)
     rr = vin - Az
