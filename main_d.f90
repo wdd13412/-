@@ -29,10 +29,15 @@ CONTAINS
     CHARACTER(len=256) :: meshpath, pointsfilepath, boundaryfilepath, &
 &   ownerfilepath, neighbourfilepath, facesfilepath, line
 	INTEGER(kind=8) :: n 
-    REAL(kind=8), ALLOCATABLE :: b_i(:), x_tan(:), dwdx(:, :) 	     	
-    REAL(kind=8) :: tol, machnum 
-    INTEGER(kind=8) :: maxiter, m_restart, c 
-    INTEGER :: info, i_param
+    REAL(kind=8), ALLOCATABLE :: b_i(:), x_tan(:), dwdx(:, :)
+    REAL(kind=8), ALLOCATABLE :: ptc_res(:), ptc_dx(:), ptc_ax(:)
+    REAL(kind=8) :: tol, machnum
+    REAL(kind=8) :: ptc_sigma0, ptc_sigma, ptc_sigma_decay
+    REAL(kind=8) :: ptc_tol_start, ptc_tol_stage
+    REAL(kind=8) :: ptc_omega_stage, ptc_res_prev, ptc_res_new, bnrm_i
+    INTEGER(kind=8) :: maxiter, m_restart, c, ptc_it, ptc_steps, maxiter_stage
+    INTEGER :: info, i_param, info_stage
+    LOGICAL :: use_tangent_ptc_outer
     REAL(kind=8), ALLOCATABLE :: rhs_rho(:, :)
     INTEGER(kind=8), SAVE :: pc_outer_counter = 0_8
 	INTEGER(kind=8), PARAMETER :: pc_update_m = 4_8
@@ -336,6 +341,12 @@ CONTAINS
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8
 								CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)   ! 先建一次，保证本轮开着
+								use_tangent_ptc_outer = .TRUE.
+								ptc_steps = 3_8
+								ptc_sigma0 = 0.80d0
+								ptc_sigma_decay = 0.35d0
+								ptc_tol_start = 5.0d-4
+								ptc_omega_stage = 0.75d0
 
 								DO i_param = 1, 1
 								!DO i_param = 1, 4
@@ -347,11 +358,51 @@ CONTAINS
 								  ! 只取每个单元的 P 分量
 									  rhs_rho(c, i_param) = b_i((c-1)*5 + 1)   
 								  END DO
-								 ! 第二個開始用前一個 x_tan 作初值,可以加速收敛
+								  ! 第二個開始用前一個 x_tan 作初值,可以加速收敛
 								  x_tan = 0.0_8
+								  IF (use_tangent_ptc_outer) THEN
+									ALLOCATE(ptc_res(n), ptc_dx(n), ptc_ax(n))
+									ptc_res = b_i
+									ptc_sigma = ptc_sigma0
+									ptc_tol_stage = MAX(tol, ptc_tol_start)
+									ptc_res_prev = SQRT(SUM(ptc_res*ptc_res))
+									bnrm_i = MAX(1.0d-30, SQRT(SUM(b_i*b_i)))
 
-								  !无雅可比矩阵GMRES方法(正向自动微分求解矩阵向量积)求解dw/dx
-								  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									DO ptc_it = 1_8, ptc_steps
+									  CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)
+									  pc_use_ptc_shift = .TRUE.
+									  pc_ptc_alpha = MIN(pc_ptc_alpha_max, MAX(pc_ptc_alpha_min, ptc_sigma))
+									  maxiter_stage = MAX(3_8, maxiter-1_8)
+									  ptc_dx = 0.0_8
+									  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, ptc_res, ptc_dx, &
+									& ptc_tol_stage, maxiter_stage, m_restart, info_stage)
+									  x_tan = x_tan + ptc_omega_stage * ptc_dx
+
+									  CALL TANGENT_MATVEC(data_4d137, cellprimitivesout, n, x_tan, ptc_ax)
+									  ptc_res = b_i - ptc_ax
+									  ptc_res_new = SQRT(SUM(ptc_res*ptc_res))
+									  PRINT *, '[PTC-OUTER] param=', i_param, ' it=', ptc_it, ' sigma=', ptc_sigma, &
+									& ' tol_lin=', ptc_tol_stage, ' ||r||/||b||=', ptc_res_new/bnrm_i, ' info=', info_stage
+									  IF (ptc_res_new <= tol * bnrm_i) EXIT
+									  IF (ptc_res_new > 0.95d0 * ptc_res_prev) THEN
+										ptc_omega_stage = MAX(0.35d0, 0.80d0*ptc_omega_stage)
+									  ELSE
+										ptc_omega_stage = MIN(0.90d0, 1.05d0*ptc_omega_stage)
+									  END IF
+									  ptc_res_prev = ptc_res_new
+									  ptc_sigma = MAX(0.05d0, ptc_sigma * ptc_sigma_decay)
+									  ptc_tol_stage = MAX(tol, ptc_tol_stage * 0.20d0)
+									END DO
+
+									! final polish on original system (sigma=0)
+									pc_use_ptc_shift = .FALSE.
+									CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)
+									CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									DEALLOCATE(ptc_res, ptc_dx, ptc_ax)
+								  ELSE
+									!无雅可比矩阵GMRES方法(正向自动微分求解矩阵向量积)求解dw/dx
+									CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+								  END IF
 								  !x_tan表示的是一个变形参数的dw/dx,维度为（ncells*5）,dwdx表示的是四个变形参数的dw/dx，维度为（ncells*5，4）
 								  dwdx(1:n, i_param) = x_tan
 								  PRINT *, 'Tangent param ', i_param, ' GMRES info=', info
