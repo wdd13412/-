@@ -169,7 +169,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_var_scale_p = 8.0d0
   REAL(kind=8), SAVE :: pc_var_scale_t = 2.0d0
   REAL(kind=8), SAVE :: pc_var_scale_u = 1.5d0
-  LOGICAL, SAVE :: pc_use_cons_right_transform = .FALSE.
+  LOGICAL, SAVE :: pc_use_cons_right_transform = .TRUE.
   REAL(kind=8), SAVE :: pc_cons_floor = 1.0d-10
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
