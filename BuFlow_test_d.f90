@@ -169,6 +169,8 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_var_scale_p = 8.0d0
   REAL(kind=8), SAVE :: pc_var_scale_t = 2.0d0
   REAL(kind=8), SAVE :: pc_var_scale_u = 1.5d0
+  LOGICAL, SAVE :: pc_use_cons_right_transform = .FALSE.
+  REAL(kind=8), SAVE :: pc_cons_floor = 1.0d-10
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
   REAL(kind=8), SAVE :: pc_mass_auto_beta = 0.08d0
@@ -8587,7 +8589,7 @@ CONTAINS
 	  REAL(kind=8) :: ux_face, uy_face, uz_face, t_face
 	  REAL(kind=8) :: wtot, mass_coeff, volc
 	  REAL(kind=8) :: dist_on, p_lap
-	  REAL(kind=8) :: w_face(5), J5(5,5), Jface(5,5), Jconv(5,5)
+	  REAL(kind=8) :: w_face(5), J5(5,5), Jface(5,5), Jconv(5,5), Jcons(5,5), Jconv_eff(5,5), Jmass_eff(5,5), scale_cons
 	    ! ==== robust-PC locals: drop compensation + shifted ILU ====
 	  INTEGER(kind=8) :: ii, pp, jj, i
 	  REAL(kind=8) :: ndiag, nblk, tinyv, drop_th, dropped_sum, compv
@@ -8744,6 +8746,12 @@ CONTAINS
 		w_face(5) = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
 
 		CALL BUILD_DUDW_5X5(w_face, fluid, J5)
+        IF (pc_use_cons_right_transform) THEN
+          CALL BUILD_DUDW_INV_5X5(w_face, fluid, Jcons)
+        ELSE
+          Jcons = 0.0_8
+          Jcons(1,1)=1.0_8; Jcons(2,2)=1.0_8; Jcons(3,3)=1.0_8; Jcons(4,4)=1.0_8; Jcons(5,5)=1.0_8
+        END IF
 		IF (pc_use_flux_jacobian) THEN
 		  CALL BUILD_FACE_FLUX_JACOBIAN_FD_5X5(w_face, fluid, nx, ny, nz, Jface)
 		  Jconv = pc_flux_jac_blend*Jface + (1.0_8-pc_flux_jac_blend)*(lam_face*J5)
@@ -8751,7 +8759,9 @@ CONTAINS
 		  Jconv = lam_face * J5
 		END IF
 		wtot = diff_w * Dsc
-		Jconv = conv_w * Jconv + wtot * J5
+        Jconv_eff = MATMUL(Jconv, Jcons)
+        Jmass_eff = MATMUL(J5, Jcons)
+		Jconv = conv_w * Jconv_eff + wtot * Jmass_eff
         IF (pc_use_pressure_laplace_reg .AND. ALLOCATED(ccenters_mesh) .AND. &
         &   SIZE(ccenters_mesh,1) >= ncells .AND. SIZE(ccenters_mesh,2) >= 3) THEN
           dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
@@ -8798,14 +8808,20 @@ CONTAINS
 		  mass_coeff = MAX(mass_coeff, pc_mass_floor)
 		  w_face(1:5) = cellprimitives(c, 1:5)
 		  CALL BUILD_DUDW_5X5(w_face, fluid, J5)
-          IF (pc_use_var_scaling) J5 = SPREAD(pc_row_inv,2,5) * J5 * SPREAD(pc_col_scale,1,5)
-		  pc_blk(p,:,:) = pc_blk(p,:,:) + mass_coeff * J5
+          IF (pc_use_cons_right_transform) THEN
+            CALL BUILD_DUDW_INV_5X5(w_face, fluid, Jcons)
+            Jmass_eff = MATMUL(J5, Jcons)
+          ELSE
+            Jmass_eff = J5
+          END IF
+          IF (pc_use_var_scaling) Jmass_eff = SPREAD(pc_row_inv,2,5) * Jmass_eff * SPREAD(pc_col_scale,1,5)
+		  pc_blk(p,:,:) = pc_blk(p,:,:) + mass_coeff * Jmass_eff
 		END DO
 	  END IF
       IF (pc_use_coarse_pv_schur) pc_use_two_level = .TRUE.
 	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
 	&         ' var_scaling=', pc_use_var_scaling, ' pseudo_mass=', pc_use_pseudo_time_mass, ' auto_mass=', pc_use_auto_mass_stab, &
-    &         ' p_lap=', pc_use_pressure_laplace_reg, ' am_poly=', pc_use_am_poly, &
+    &         ' p_lap=', pc_use_pressure_laplace_reg, ' cons_right=', pc_use_cons_right_transform, ' am_poly=', pc_use_am_poly, &
 	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level, &
     &         ' coarse_pv_schur=', pc_use_coarse_pv_schur, ' schur_split=', pc_use_schur_split
         ! 0) 先保留你已有的对角小正则
@@ -10658,6 +10674,22 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 	  J(5,4) = rho*Uy
 	  J(5,5) = rho*Uz
 	END SUBROUTINE BUILD_DUDW_5X5
+
+    SUBROUTINE BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
+      IMPLICIT NONE
+      REAL(kind=8), INTENT(IN) :: wp(5)
+      TYPE(FLUIDD), INTENT(IN) :: fluid
+      REAL(kind=8), INTENT(OUT) :: Jinv(5,5)
+      REAL(kind=8) :: J(5,5)
+      LOGICAL :: ok
+
+      CALL BUILD_DUDW_5X5(wp, fluid, J)
+      CALL INVERT_DENSE(J, Jinv, ok)
+      IF (.NOT. ok) THEN
+        Jinv = 0.0_8
+        Jinv(1,1)=1.0_8; Jinv(2,2)=1.0_8; Jinv(3,3)=1.0_8; Jinv(4,4)=1.0_8; Jinv(5,5)=1.0_8
+      END IF
+    END SUBROUTINE BUILD_DUDW_INV_5X5
 
 	SUBROUTINE SORT_UNIQUE_I8(arr, nout)
 	  IMPLICIT NONE
