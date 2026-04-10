@@ -147,7 +147,7 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_drop_comp = .FALSE.
   REAL(kind=8), SAVE :: pc_drop_comp_beta = 0.8d0
     ! ===== two-level coarse correction (5 coarse modes: P,T,Ux,Uy,Uz constants) =====
-  LOGICAL, SAVE :: pc_use_two_level = .FALSE.
+  LOGICAL, SAVE :: pc_use_two_level = .TRUE.
   LOGICAL, SAVE :: pc_coarse_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac(:,:), pc_Ac_inv(:,:)
     ! ===== two-level coarse space: 5 x Nagg =====
@@ -179,7 +179,7 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_pressure_laplace_reg = .FALSE.
   REAL(kind=8), SAVE :: pc_press_laplace_beta = 0.01d0
   ! ===== AM^{-1} polynomial defect-correction =====
-  LOGICAL, SAVE :: pc_use_am1 = .FALSE.
+  LOGICAL, SAVE :: pc_use_am1 = .TRUE.
   REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
   LOGICAL, SAVE :: pc_use_am_poly = .FALSE.
   INTEGER(kind=8), SAVE :: pc_am_poly_steps = 2_8
@@ -191,19 +191,24 @@ MODULE BUFLOWMODULE_DIFF
   INTEGER(kind=8), SAVE :: pc_two_level_presmooth = 1_8
   INTEGER(kind=8), SAVE :: pc_two_level_postsmooth = 1_8
   REAL(kind=8), SAVE :: pc_two_level_omega = 0.85d0
-  LOGICAL, SAVE :: pc_use_coarse_pv_schur = .FALSE.
+  LOGICAL, SAVE :: pc_use_coarse_pv_schur = .TRUE.
   LOGICAL, SAVE :: pc_use_coarse_div_mode = .FALSE.
   INTEGER(kind=8), SAVE :: pc_div_modes = 3_8
   REAL(kind=8), SAVE :: pc_div_rhs_blend = 0.60d0
   REAL(kind=8), SAVE :: pc_div_mode_vel_gain = 0.08d0
-  LOGICAL, SAVE :: pc_use_schur_split = .TRUE.
+  LOGICAL, SAVE :: pc_use_schur_split = .FALSE.
   INTEGER(kind=8), SAVE :: pc_schur_sweeps = 3_8
   REAL(kind=8), SAVE :: pc_schur_omega = 0.65d0
   INTEGER(kind=8), SAVE :: pc_schur_u_sweeps = 2_8
   REAL(kind=8), SAVE :: pc_schur_u_omega = 0.80d0
-  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.00d0
+  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.30d0
   REAL(kind=8), SAVE :: pc_schur_u_diag_boost = 0.00d0
   REAL(kind=8), SAVE :: pc_schur_diag_couple = 0.00d0
+  ! ===== PCD/LSC-inspired coarse pressure Schur blend =====
+  LOGICAL, SAVE :: pc_use_pcd_lsc_mix = .TRUE.
+  REAL(kind=8), SAVE :: pc_pcd_laplace_blend = 0.20d0
+  REAL(kind=8), SAVE :: pc_pcd_mass_beta = 0.02d0
+  REAL(kind=8), SAVE :: pc_pcd_u_diag_boost = 0.10d0
   REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_div_basis(:, :)   ! (ncells,3), 低频散度模态基
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_duu_inv(:, :, :)  ! (ncells,4,4), momentum/energy block inverse
@@ -9811,13 +9816,14 @@ CONTAINS
     SUBROUTINE PC_BUILD_COARSE_PV_SCHUR(ncells)
       IMPLICIT NONE
       INTEGER(kind=8), INTENT(IN) :: ncells
-      INTEGER(kind=8) :: i, j, p, agi, agj, pd, ncoarse, m
-      REAL(kind=8) :: epsd, diag_mean, tr, app, dotv, offsum, target
+      INTEGER(kind=8) :: i, j, p, agi, agj, pd, ncoarse, m, f, ownercell, neighbourcell
+      REAL(kind=8) :: epsd, diag_mean, tr, app, dotv, offsum, target, area_face, dist_on, wlap
+      REAL(kind=8) :: lap_diag_mean, lap_scale, blend_w
       REAL(kind=8) :: xmin, xmax, ymin, ymax, zmin, zmax, dx, dy, dz, xn, yn, zn, xi
       REAL(kind=8) :: Apu_i(4), Aup_j(4), Auu4(4,4), Auu4_inv(4,4), tmp4(4)
       REAL(kind=8) :: sij
       LOGICAL :: ok4, okinv
-      REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:)
+      REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:), Ac_lap(:,:), Ac_mass(:)
 
       pc_coarse_ready = .FALSE.
       IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_diag_pos)) RETURN
@@ -9857,6 +9863,9 @@ CONTAINS
         Auu4(2,1) = Ablk(pd,3,2); Auu4(2,2) = Ablk(pd,3,3); Auu4(2,3) = Ablk(pd,3,4); Auu4(2,4) = Ablk(pd,3,5)
         Auu4(3,1) = Ablk(pd,4,2); Auu4(3,2) = Ablk(pd,4,3); Auu4(3,3) = Ablk(pd,4,4); Auu4(3,4) = Ablk(pd,4,5)
         Auu4(4,1) = Ablk(pd,5,2); Auu4(4,2) = Ablk(pd,5,3); Auu4(4,3) = Ablk(pd,5,4); Auu4(4,4) = Ablk(pd,5,5)
+        DO m = 1_8, 4_8
+          Auu4(m,m) = Auu4(m,m) + pc_pcd_u_diag_boost * MAX(ABS(Auu4(m,m)), epsd)
+        END DO
         CALL INVERT_DENSE(Auu4, Auu4_inv, ok4)
         IF (.NOT. ok4) THEN
           Auu4_inv = 0.0_8
@@ -9879,6 +9888,74 @@ CONTAINS
           pc_Ac_p(agi, agj) = pc_Ac_p(agi, agj) + sij
         END DO
       END DO
+
+      ! PCD/LSC-inspired coarse Schur shaping:
+      ! blend algebraic Schur with a geometric pressure Laplacian and pressure-mass proxy.
+      IF (pc_use_pcd_lsc_mix) THEN
+        ALLOCATE(Ac_lap(ncoarse, ncoarse), Ac_mass(ncoarse))
+        Ac_lap = 0.0_8
+        Ac_mass = 0.0_8
+
+        IF (ALLOCATED(faces_mesh) .AND. ALLOCATED(favecs_mesh) .AND. ALLOCATED(ccenters_mesh)) THEN
+          DO f = 1_8, SIZE(faces_mesh,1)
+            ownercell = faces_mesh(f,1)
+            neighbourcell = faces_mesh(f,2)
+            IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
+            IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
+
+            agi = pc_agg_id(ownercell)
+            agj = pc_agg_id(neighbourcell)
+            IF (agi <= 0_8 .OR. agj <= 0_8) CYCLE
+
+            area_face = SQRT(favecs_mesh(f,1)**2 + favecs_mesh(f,2)**2 + favecs_mesh(f,3)**2)
+            dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
+            &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
+            &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
+            dist_on = MAX(dist_on, 1.0d-12)
+            wlap = area_face / dist_on
+            IF (wlap <= 0.0_8) CYCLE
+
+            Ac_lap(agi, agi) = Ac_lap(agi, agi) + wlap
+            Ac_lap(agj, agj) = Ac_lap(agj, agj) + wlap
+            Ac_lap(agi, agj) = Ac_lap(agi, agj) - wlap
+            Ac_lap(agj, agi) = Ac_lap(agj, agi) - wlap
+          END DO
+        END IF
+
+        DO i = 1_8, ncells
+          pd = pc_diag_pos(i)
+          IF (pd <= 0_8) CYCLE
+          agi = pc_agg_id(i)
+          Ac_mass(agi) = Ac_mass(agi) + MAX(0.0_8, ABS(Ablk(pd,1,1)))
+        END DO
+
+        tr = 0.0_8
+        DO agi = 1_8, ncoarse
+          tr = tr + ABS(pc_Ac_p(agi,agi))
+        END DO
+        diag_mean = tr / MAX(1.0_8, REAL(ncoarse, kind=8))
+        IF (diag_mean <= epsd) diag_mean = 1.0_8
+
+        lap_diag_mean = 0.0_8
+        DO agi = 1_8, ncoarse
+          lap_diag_mean = lap_diag_mean + ABS(Ac_lap(agi,agi))
+        END DO
+        lap_diag_mean = lap_diag_mean / MAX(1.0_8, REAL(ncoarse, kind=8))
+        blend_w = MIN(0.90_8, MAX(0.0_8, pc_pcd_laplace_blend))
+        IF (lap_diag_mean > epsd) THEN
+          lap_scale = diag_mean / lap_diag_mean
+          DO agi = 1_8, ncoarse
+            DO agj = 1_8, ncoarse
+              pc_Ac_p(agi, agj) = (1.0_8 - blend_w) * pc_Ac_p(agi, agj) + &
+              & blend_w * lap_scale * Ac_lap(agi, agj)
+            END DO
+          END DO
+        END IF
+        DO agi = 1_8, ncoarse
+          pc_Ac_p(agi, agi) = pc_Ac_p(agi, agi) + pc_pcd_mass_beta * Ac_mass(agi)
+        END DO
+        DEALLOCATE(Ac_lap, Ac_mass)
+      END IF
 
       tr = 0.0_8
       DO agi = 1_8, ncoarse
