@@ -341,7 +341,7 @@ CONTAINS
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8
 								CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)   ! 先建一次，保证本轮开着
-								use_tangent_ptc_outer = .TRUE.
+								use_tangent_ptc_outer = .FALSE.
 								ptc_steps = 3_8
 								ptc_sigma0 = 0.80d0
 								ptc_sigma_decay = 0.35d0
