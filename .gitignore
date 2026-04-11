@@ -1,0 +1,6 @@
+cfd_solver
+*.mod
+*.o
+*.vtk
+cfd_output.log
+wing_update.csv
