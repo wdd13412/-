@@ -102,6 +102,12 @@ MODULE TYPESMODULE_DIFF
   REAL(kind=8), ALLOCATABLE :: point_update(:, :)
   REAL(kind=8), ALLOCATABLE :: point_updated(:, :)
   REAL(kind=8), ALLOCATABLE :: wing(:, :), inoutput(:, :)
+!!!!!!!!!runtime config
+  INTEGER(kind=8), PARAMETER :: deformation_mode_airfoil=1_8
+  INTEGER(kind=8), PARAMETER :: deformation_mode_cylinder=2_8
+  INTEGER(kind=8) :: deformation_mode_runtime = deformation_mode_airfoil
+  CHARACTER(len=256) :: mesh_path_runtime = 'mesh/OFairfoilMesh'
+  REAL(kind=8) :: cylinder_axis_ratio_runtime = 1.0_8
 !!!!!!!!!drag
 ! 阻力伴随：存放当前阻力 J（标量），供 Tapenade/驱动使用
   REAL(kind=8) :: drag_value

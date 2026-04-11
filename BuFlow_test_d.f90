@@ -4742,7 +4742,7 @@ CONTAINS
 ! 显式定义int64为8字节整数（等价于kind=8）        
     INTEGER(kind=8), PARAMETER :: int64=8
     CHARACTER(len=*), INTENT(IN) :: filepath
-    INTEGER(kind=8) :: facepoints(74151, 4)
+    INTEGER(kind=8), ALLOCATABLE :: facepoints(:, :)
 !        type(FaceType), allocatable :: tmp_faces(:)
 !        character(len=1000), allocatable :: lines_Faces(:)
     INTEGER(kind=8) :: startline, fcount, i, nlines, iostat, file_unit, &
@@ -4752,6 +4752,7 @@ CONTAINS
     INTEGER(kind=8) :: pt_count
     INTRINSIC TRIM
     INTRINSIC INDEX
+    INTRINSIC ALLOCATED
 !        integer(kind=8), allocatable :: pts_Faces(:)  
     PRINT*, 'A'
     file_unit = GET_FREE_UNIT()
@@ -4768,6 +4769,12 @@ CONTAINS
         END DO
         CLOSE(file_unit) 
         CALL OFFILE_FINDNITEMS(lines_faces, startline, fcount)
+        IF (fcount .LE. 0) THEN
+          ALLOCATE(facepoints(0, 4))
+          RETURN
+        END IF
+        ALLOCATE(facepoints(fcount, 4), source=0_int64)
+        IF (.NOT.ALLOCATED(pts_faces)) ALLOCATE(pts_faces(4), source=0_int64)
 !        allocate(tmp_faces(fCount))
 ! 循环外一次性分配
 !		allocate(pts_Faces(max_pt_count), source=0_int64)
@@ -4779,13 +4786,17 @@ CONTAINS
           bracketl = INDEX(line, '(')
           bracketr = INDEX(line, ')')
           READ(line(1:bracketl-1), *) pt_count
+          IF (pt_count .NE. 4) THEN
+            PRINT*, 'Error: non-quad face in file: ', TRIM(filepath)
+            STOP
+          END IF
 ! 读取括号内的点索引
-          READ(line(bracketl+1:bracketr-1), *) pts_faces
+          READ(line(bracketl+1:bracketr-1), *) pts_faces(1:pt_count)
 ! 0基转1基
-          pts_faces = pts_faces + 1
+          pts_faces(1:pt_count) = pts_faces(1:pt_count) + 1
 ! 给面结构分配空间并赋值
 !			allocate(tmp_faces(i)%points(pt_count))
-          facepoints(i, :) = pts_faces
+          facepoints(i, 1:pt_count) = pts_faces(1:pt_count)
         END DO
         PRINT*, 'A'
 !		deallocate(pts_Faces)
@@ -7512,7 +7523,7 @@ CONTAINS
     TYPE(FLUIDD) :: fluid
 !		type(Meshh), allocatable :: mesh
 !		real*8, allocatable, intent(in) :: point_update(:,:) ! 输入：变形网格点
-    REAL(kind=8) :: cellprimitives(18513, 5)
+    REAL(kind=8), ALLOCATABLE :: cellprimitives(:, :)
 !		type(SolutionState), allocatable, intent(inout) :: sln
     REAL(kind=8), ALLOCATABLE, INTENT(INOUT) :: cellprimitivess(:, :)
 !		real(kind=8), intent(inout) :: cellPrimitivess_1
@@ -7581,7 +7592,7 @@ CONTAINS
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
 ! 读取网格
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
 !!!!!!!!!!!	   
 !		allocate(tempMesh%owner(0), neighbour_tempMesh(0))		    
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
@@ -7603,6 +7614,8 @@ CONTAINS
 ! 修改后的代码
     CALL UNSTRUCTUREDMESHINFO(meshinfo)
     ncells = meshinfo(1)
+    IF (ALLOCATED(cellprimitives)) DEALLOCATE(cellprimitives)
+    ALLOCATE(cellprimitives(ncells, 5))
 !		allocate(cellPrimitives(nCells, 5)) 
 ! 初始化均匀解
     PRINT*, 'a1'
@@ -7720,7 +7733,7 @@ CONTAINS
     boundaryconditions(4)%type = outletboundary
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     IF (.NOT. buf_jst_mesh_geometry_cached) THEN
       CALL READOPENFOAMMESH_D(meshpath, point_update, point_updated, tempmesh)
       CALL OPENFOAMMESH_D(meshpath, point_update, tempmesh)
@@ -7785,7 +7798,7 @@ CONTAINS
     boundaryconditions(4)%type = outletboundary
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL DEALLOCATEMESHDATA(tempmesh)
@@ -7868,7 +7881,7 @@ CONTAINS
     boundaryconditions(4)%params(1) = p
     boundaryconditionsd(4)%params(2:5) = 0.0_8
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL DEALLOCATEMESHDATA(tempmesh)
@@ -7944,7 +7957,7 @@ CONTAINS
     boundaryconditions(4)%type = outletboundary
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL DEALLOCATEMESHDATA(tempmesh)

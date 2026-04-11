@@ -24,7 +24,7 @@ CONTAINS
 &   , file_unit_boundary, nlines_owner, file_unit_owner, &
 &   nlines_neighbour, file_unit_neighbour, nlines_faces, file_unit_faces&
 &   , startline_faces, fcount, i, bracketl, bracketr, pt_count
-    INTEGER(kind=8) :: bcount, startline_boundary, npoints
+    INTEGER(kind=8) :: bcount, startline_boundary, npoints, startline_points
 !        real(kind=8), allocatable :: point_update(:,:)  
     CHARACTER(len=256) :: meshpath, pointsfilepath, boundaryfilepath, &
 &   ownerfilepath, neighbourfilepath, facesfilepath, line
@@ -51,7 +51,7 @@ CONTAINS
 !!!!!!!!!!!!
 !!!!!!!!!!!!!!meshdeformation
     file_unit_points = GET_FREE_UNITT()
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     pointsfilepath = TRIM(meshpath)//'/points'
     OPEN(unit=file_unit_points, file=pointsfilepath, status='old', &
 &  action='read', iostat=iostat) 
@@ -61,6 +61,14 @@ CONTAINS
       IF (iostat .NE. 0) THEN
         REWIND(file_unit_points) 
         ALLOCATE(lines_defor(nlines_points))
+        DO i=1,nlines_points
+          READ(file_unit_points, '(a)') lines_defor(i)
+        END DO
+        CALL OFFILE_FINDNITEMSSS(lines_defor, startline_points, npoints)
+        IF (npoints .LE. 0) THEN
+          PRINT*, 'Error: invalid points count in ', TRIM(pointsfilepath)
+          RETURN
+        END IF
         boundaryfilepath = TRIM(meshpath)//'/boundary'
         file_unit_boundary = GET_FREE_UNIT()
         OPEN(unit=file_unit_boundary, file=boundaryfilepath, status=&
@@ -127,7 +135,7 @@ CONTAINS
                             READ(file_unit_faces, '(a)', iostat=iostat) 
                             IF (iostat .NE. 0) THEN
                               REWIND(file_unit_faces) 
-                              ALLOCATE(lines_faces(74151))
+                              ALLOCATE(lines_faces(nlines_faces))
                               DO i=1,nlines_faces
                                 READ(file_unit_faces, '(a)') lines_faces&
 &                              (i)
@@ -157,7 +165,7 @@ CONTAINS
                               ALLOCATE(neighbour_tempmesh(0))
                               ALLOCATE(facepoints_tempmesh(0, 0))
                               PRINT*, 'A'
-                              ALLOCATE(points_tempmesh(37243, 3))
+                              ALLOCATE(points_tempmesh(npoints, 3))
                               CALL READOPENFOAMMESHH(meshpath, tempmesh)
                               PRINT*, 'ABC'
                               npoints = SIZE(points_tempmesh, 1)
@@ -240,7 +248,7 @@ CONTAINS
                               ALLOCATE(cellfacecount(ncells))
                               ALLOCATE(uunitvec(3))
 !        allocate(points_tempMesh(size(point_update,1), size(point_update,2))) !在readOFPointsFilef里面已经allocate
-                              ALLOCATE(points_meshdefor(37254, 3), &
+                              ALLOCATE(points_meshdefor(npoints, 3), &
 &                             source=0.0_8)
                               ALLOCATE(inoutput(99, 2))
                               ALLOCATE(wing(99, 2))
@@ -261,7 +269,7 @@ CONTAINS
 !		meshInfo = unstructuredMeshInfo(mesh) 
 !		nCells = meshInfo(1)  
 !		allocate(cellPrimitives(nCells, 5)) 
-                              ALLOCATE(cellprimitivesout(18513, 5))
+                              ALLOCATE(cellprimitivesout(ncells, 5))
 ! 显式赋值，确保 Tapenade 识别为"活跃输出"
                               cellprimitivesout = 0.0d0
                               PRINT*, 'ABC'
@@ -316,7 +324,7 @@ CONTAINS
 
 							! 對應 UunitVec, points_tempMesh, point_update
 							allocate(uunitVecd(3))
-							allocate(points_tempMeshd(37243, 3))
+							allocate(points_tempMeshd(nPoints, 3))
 							allocate(point_updated(nPoints, 3))
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -332,7 +340,7 @@ CONTAINS
                               !通过差分稳态计算残差对变形参数的偏导
                               !CALL RESIDUAL_FD_DEFORM_PARAM_VTK(data_4d137, cellprimitivesout, &
 !&   meshpath, iparam_col=1, eps_fd=1.0d-5, vtk_stem='residual_fd_x1')
-							  ncells = 18513
+							  ncells = SIZE(cellprimitivesout, 1)
 								n = ncells*5
 								ALLOCATE(b_i(n), x_tan(n), dwdx(n, 5), rhs_rho(ncells, 5))
 								tol = 1.0d-8!tol = 1.0d-8
@@ -422,7 +430,7 @@ CONTAINS
 								rhs_rho(1:ncells, 5) = 0.0_8!这里实际上是对mach的导数
     							PRINT *, 'Tangent param (Mach) GMRES info=', info
     							!输出vtk,csv
-								meshpath = 'mesh/OFairfoilMesh'
+								meshpath = TRIM(mesh_path_runtime)
 								CALL OUTPUT_WALL_CP_CSV(meshpath, point_update, cellprimitivesout, dwdx, ncells, 'wall_cp_data.csv')
 								print *, "ABD"
 								CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitivesout)
@@ -650,7 +658,7 @@ CONTAINS
 &   , file_unit_boundary, nlines_owner, file_unit_owner, &
 &   nlines_neighbour, file_unit_neighbour, nlines_faces, file_unit_faces&
 &   , startline_faces, fcount, i, bracketl, bracketr, pt_count
-    INTEGER(kind=8) :: bcount, startline_boundary, npoints
+    INTEGER(kind=8) :: bcount, startline_boundary, npoints, startline_points
     CHARACTER(len=256) :: meshpath, pointsfilepath, boundaryfilepath, &
 &   ownerfilepath, neighbourfilepath, facesfilepath, line
     TYPE(MESHDATA) :: tempmesh
@@ -659,7 +667,7 @@ CONTAINS
     INTRINSIC SIZE
     INTRINSIC MAXVAL
     INTRINSIC ALLOCATED
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     file_unit_points = GET_FREE_UNITT()
     pointsfilepath = TRIM(meshpath)//'/points'
     OPEN(unit=file_unit_points, file=pointsfilepath, status='old', &
@@ -670,6 +678,14 @@ CONTAINS
       IF (iostat .NE. 0) THEN
         REWIND(file_unit_points) 
         ALLOCATE(lines_defor(nlines_points))
+        DO i=1,nlines_points
+          READ(file_unit_points, '(a)') lines_defor(i)
+        END DO
+        CALL OFFILE_FINDNITEMSSS(lines_defor, startline_points, npoints)
+        IF (npoints .LE. 0) THEN
+          PRINT*, 'Error: invalid points count in ', TRIM(pointsfilepath)
+          RETURN
+        END IF
         boundaryfilepath = TRIM(meshpath)//'/boundary'
         file_unit_boundary = GET_FREE_UNIT()
         OPEN(unit=file_unit_boundary, file=boundaryfilepath, status=&
@@ -730,7 +746,7 @@ CONTAINS
                             READ(file_unit_faces, '(a)', iostat=iostat) 
                             IF (iostat .NE. 0) THEN
                               REWIND(file_unit_faces) 
-                              ALLOCATE(lines_faces(74151))
+                              ALLOCATE(lines_faces(nlines_faces))
                               DO i=1,nlines_faces
                                 READ(file_unit_faces, '(a)') lines_faces&
 &                              (i)
@@ -752,7 +768,7 @@ CONTAINS
                               ALLOCATE(owner_tempmesh(0))
                               ALLOCATE(neighbour_tempmesh(0))
                               ALLOCATE(facepoints_tempmesh(0, 0))
-                              ALLOCATE(points_tempmesh(37243, 3))
+                              ALLOCATE(points_tempmesh(npoints, 3))
                               CALL READOPENFOAMMESHH(meshpath, tempmesh)
                               npoints = SIZE(points_tempmesh, 1)
                               nfaces = SIZE(owner_tempmesh)
@@ -826,7 +842,7 @@ CONTAINS
 &                             1, :)), 3))
                               ALLOCATE(cellfacecount(ncells))
                               ALLOCATE(uunitvec(3))
-                              ALLOCATE(points_meshdefor(37254, 3), &
+                              ALLOCATE(points_meshdefor(npoints, 3), &
 &                             source=0.0_8)
                               ALLOCATE(inoutput(99, 2))
                               ALLOCATE(wing(99, 2))
