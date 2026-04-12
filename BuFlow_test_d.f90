@@ -240,6 +240,7 @@ MODULE BUFLOWMODULE_DIFF
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_off(:)       ! (nnzb) 仅邻接项，含对角位可复用
 	LOGICAL, SAVE :: pc_sp_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: point_updated_rhs(:, :)
+  LOGICAL, SAVE :: use_primitive_residual_operator = .FALSE.
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 CONTAINS
@@ -8134,6 +8135,7 @@ CONTAINS
 	  END INTERFACE
 
 	  REAL(kind=8), ALLOCATABLE :: r(:), v(:, :), w(:), h(:, :), y(:), z(:), tmp(:)
+	  REAL(kind=8), ALLOCATABLE :: r_lin(:), r_work(:), x_work(:), q_tmp(:), q_inv_tmp(:)
 	  REAL(kind=8) :: bnrm, rnrm_true, tol_b, beta_kry, res_ls, &
   xnrm_old, xnrm_new, znrm, rcheck, v1norm
       REAL(kind=8) :: eta_k, eta_prev, tol_b_k, phi_exp
@@ -8162,6 +8164,7 @@ CONTAINS
 
 	  ALLOCATE(r(n), v(n, m_restart+1), w(n), h(m_restart+1, m_restart), &
 	&          y(m_restart), z(n), tmp(n))
+	  ALLOCATE(r_lin(n), r_work(n), x_work(n), q_tmp(n), q_inv_tmp(n))
 
 	  ! ---------- 初始真殘差 r = b - A*x ----------
 	  bnrm = SQRT(SUM(b*b))
@@ -8181,6 +8184,10 @@ CONTAINS
 	  PRINT *, '[GMRES-DBG] init x(1:5)=', x(1:5)
 	  PRINT *, '[GMRES-DBG] init w(1:5)=', w(1:5)
 	  r = b - w
+	  IF (use_primitive_residual_operator) THEN
+		CALL APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r, r_work)
+		r = r_work
+	  END IF
 	  rnrm_true = SQRT(SUM(r*r))
 
 	  ! ---------- 線性算子診斷（僅一次）----------
@@ -8463,6 +8470,10 @@ CONTAINS
 !		w(1:n) = w(1:n) + eps_reg * x(1:n)
 		!!!!!
 		r = b - w
+		IF (use_primitive_residual_operator) THEN
+		  CALL APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r, r_work)
+		  r = r_work
+		END IF
 		rnrm_true = SQRT(SUM(r*r))
 		rnrm_prev_outer = rnrm_true
 		PRINT *, '  [GMRES] outer=', k, ' true||r||=', rnrm_true, &
@@ -10832,6 +10843,58 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
         Jinv(1,1)=1.0_8; Jinv(2,2)=1.0_8; Jinv(3,3)=1.0_8; Jinv(4,4)=1.0_8; Jinv(5,5)=1.0_8
       END IF
     END SUBROUTINE BUILD_DUDW_INV_5X5
+
+  SUBROUTINE APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r_in, r_out)
+    IMPLICIT NONE
+    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+    REAL(kind=8), INTENT(IN) :: r_in(:)
+    REAL(kind=8), INTENT(OUT) :: r_out(:)
+    INTEGER(kind=8) :: ncells, c
+    REAL(kind=8) :: wp(5), Jinv(5, 5), rv(5), rw(5)
+    TYPE(FLUIDD) :: fluid
+
+    fluid%cp = 1005.0d0
+    fluid%r = 287.05d0
+    fluid%gammaa = 1.4d0
+
+    ncells = SIZE(r_in)/5_8
+    r_out = r_in
+    IF (SIZE(cellprimitives, 1) < ncells .OR. SIZE(cellprimitives, 2) < 5) RETURN
+
+    DO c = 1_8, ncells
+      wp(1:5) = cellprimitives(c, 1:5)
+      CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
+      rv(1:5) = r_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
+      rw = MATMUL(Jinv, rv)
+      r_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = rw
+    END DO
+  END SUBROUTINE APPLY_PRIMITIVE_LEFT_TRANSFORM
+
+  SUBROUTINE APPLY_INV_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r_in, r_out)
+    IMPLICIT NONE
+    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+    REAL(kind=8), INTENT(IN) :: r_in(:)
+    REAL(kind=8), INTENT(OUT) :: r_out(:)
+    INTEGER(kind=8) :: ncells, c
+    REAL(kind=8) :: wp(5), J(5, 5), rv(5), rw(5)
+    TYPE(FLUIDD) :: fluid
+
+    fluid%cp = 1005.0d0
+    fluid%r = 287.05d0
+    fluid%gammaa = 1.4d0
+
+    ncells = SIZE(r_in)/5_8
+    r_out = r_in
+    IF (SIZE(cellprimitives, 1) < ncells .OR. SIZE(cellprimitives, 2) < 5) RETURN
+
+    DO c = 1_8, ncells
+      wp(1:5) = cellprimitives(c, 1:5)
+      CALL BUILD_DUDW_5X5(wp, fluid, J)
+      rv(1:5) = r_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
+      rw = MATMUL(J, rv)
+      r_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = rw
+    END DO
+  END SUBROUTINE APPLY_INV_PRIMITIVE_LEFT_TRANSFORM
 
 	SUBROUTINE SORT_UNIQUE_I8(arr, nout)
 	  IMPLICIT NONE
