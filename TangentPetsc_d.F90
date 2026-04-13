@@ -2,7 +2,8 @@ MODULE TANGENT_PETSC_MODULE
 #include <petsc/finclude/petscksp.h>
   USE petscksp
   USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC, APPLY_TANGENT_OPERATOR_WORK, &
-& APPLY_RESIDUAL_SCALING
+& APPLY_RESIDUAL_SCALING, pc_row_ptr, pc_col_ind, pc_blk, pc_a0_blk, &
+& pc_a0_ready, pc_diag_pos
   USE TYPESMODULE_DIFF, ONLY: point_updated, fluxresiduals_slnd, facefluxes_slnd, &
  & cellfluxes_slnd, cellstate_slnd, cellprimitives_slnd
   IMPLICIT NONE
@@ -197,9 +198,83 @@ CONTAINS
     tangent_idx_n = n
   END SUBROUTINE TANGENT_PETSC_SET_CONTEXT
 
+  SUBROUTINE BUILD_PMAT_FROM_PC_BLOCKS(nloc, Pmat, pmat_ready, ierr)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: nloc
+    Mat, INTENT(OUT) :: Pmat
+    LOGICAL, INTENT(OUT) :: pmat_ready
+    PetscErrorCode, INTENT(OUT) :: ierr
+    INTEGER(kind=8) :: ncells, c, p, j, ir, jc, nblkrow
+    PetscInt :: n_petsc
+    PetscInt, ALLOCATABLE :: d_nnz(:), row_idx(:), col_idx(:)
+    PetscScalar :: row_vals(5)
+    LOGICAL :: use_a0
+
+    ierr = 0
+    pmat_ready = .FALSE.
+
+    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_diag_pos)) RETURN
+    use_a0 = pc_a0_ready .AND. ALLOCATED(pc_a0_blk)
+    IF ((.NOT. use_a0) .AND. (.NOT. ALLOCATED(pc_blk))) RETURN
+
+    ncells = SIZE(pc_diag_pos, kind=8)
+    IF (ncells <= 0_8) RETURN
+    IF (nloc /= 5_8 * ncells) RETURN
+    IF (SIZE(pc_row_ptr, kind=8) < ncells + 1_8) RETURN
+
+    n_petsc = INT(nloc, KIND=KIND(n_petsc))
+    ALLOCATE(d_nnz(n_petsc))
+    d_nnz = 1
+    DO c = 1_8, ncells
+      nblkrow = MAX(1_8, pc_row_ptr(c+1_8) - pc_row_ptr(c))
+      DO ir = 1_8, 5_8
+        d_nnz(INT((c-1_8)*5_8 + ir, KIND=KIND(d_nnz(1)))) = INT(5_8*nblkrow, KIND=KIND(d_nnz(1)))
+      END DO
+    END DO
+
+    CALL MatCreateSeqAIJ(PETSC_COMM_SELF, n_petsc, n_petsc, 0, d_nnz, Pmat, ierr)
+    DEALLOCATE(d_nnz)
+    IF (ierr /= 0) RETURN
+
+    ALLOCATE(row_idx(1), col_idx(5))
+    DO c = 1_8, ncells
+      DO p = pc_row_ptr(c), pc_row_ptr(c+1_8)-1_8
+        j = pc_col_ind(p)
+        IF (j < 1_8 .OR. j > ncells) CYCLE
+
+        DO jc = 1_8, 5_8
+          col_idx(jc) = INT((j-1_8)*5_8 + (jc-1_8), KIND=KIND(col_idx(jc)))
+        END DO
+        DO ir = 1_8, 5_8
+          row_idx(1) = INT((c-1_8)*5_8 + (ir-1_8), KIND=KIND(row_idx(1)))
+          DO jc = 1_8, 5_8
+            IF (use_a0) THEN
+              row_vals(jc) = pc_a0_blk(p, ir, jc)
+            ELSE
+              row_vals(jc) = pc_blk(p, ir, jc)
+            END IF
+          END DO
+          CALL MatSetValues(Pmat, 1, row_idx, 5, col_idx, row_vals, INSERT_VALUES, ierr)
+          IF (ierr /= 0) THEN
+            DEALLOCATE(row_idx, col_idx)
+            RETURN
+          END IF
+        END DO
+      END DO
+    END DO
+    DEALLOCATE(row_idx, col_idx)
+
+    CALL MatAssemblyBegin(Pmat, MAT_FINAL_ASSEMBLY, ierr)
+    IF (ierr /= 0) RETURN
+    CALL MatAssemblyEnd(Pmat, MAT_FINAL_ASSEMBLY, ierr)
+    IF (ierr /= 0) RETURN
+
+    pmat_ready = .TRUE.
+  END SUBROUTINE BUILD_PMAT_FROM_PC_BLOCKS
+
   SUBROUTINE TANGENT_PETSC_MATMULT_IMPL(A, X, Y, ierr)
     IMPLICIT NONE
-    Mat :: A
+    Mat :: A, Pmat
     Vec :: X, Y
     PetscErrorCode :: ierr
     INTEGER(kind=8) :: nloc, i
@@ -288,7 +363,7 @@ CONTAINS
     INTEGER(kind=8), INTENT(IN) :: n, maxiter, m_restart
     INTEGER, INTENT(OUT) :: info
 
-    Mat :: A
+    Mat :: A, Pmat
     Vec :: vb, vx, vtmp
     KSP :: ksp
     PC :: pc
@@ -300,8 +375,10 @@ CONTAINS
     PetscScalar, ALLOCATABLE :: vals(:)
     REAL(kind=8), ALLOCATABLE :: zprobe(:), az(:), b_work(:)
     EXTERNAL TANGENT_PETSC_MATMULT
+    LOGICAL :: pmat_ready, pmat_created
 
     info = 2
+    pmat_created = .FALSE.
     IF (n <= 0_8) RETURN
 
     CALL TANGENT_PETSC_SET_CONTEXT(data_4d137, cellprimitives, n)
@@ -353,6 +430,15 @@ CONTAINS
       CALL MatDestroy(A, ierr)
       RETURN
     END IF
+    CALL BUILD_PMAT_FROM_PC_BLOCKS(n, Pmat, pmat_ready, ierr)
+    IF (ierr == 0 .AND. pmat_ready) THEN
+      pmat_created = .TRUE.
+      PRINT *, '[PETSC-PMAT] using explicit AIJ Pmat from PC blocks'
+    ELSE
+      pmat_ready = .FALSE.
+      ierr = 0
+      PRINT *, '[PETSC-PMAT] fallback: no explicit Pmat available'
+    END IF
 
     CALL VecCreateSeq(PETSC_COMM_SELF, n_petsc, vb, ierr)
     CALL VecDuplicate(vb, vx, ierr)
@@ -392,7 +478,11 @@ CONTAINS
     CALL VecDestroy(vtmp, ierr)
 
     CALL KSPCreate(PETSC_COMM_SELF, ksp, ierr)
-    CALL KSPSetOperators(ksp, A, A, ierr)
+    IF (pmat_ready) THEN
+      CALL KSPSetOperators(ksp, A, Pmat, ierr)
+    ELSE
+      CALL KSPSetOperators(ksp, A, A, ierr)
+    END IF
     ! Keep a safe default; actual KSP/PC is overridden from runtime options.
     CALL KSPSetType(ksp, KSPGMRES, ierr)
     CALL KSPGMRESSetRestart(ksp, restart_petsc, ierr)
@@ -425,6 +515,7 @@ CONTAINS
     CALL KSPDestroy(ksp, ierr)
     CALL VecDestroy(vb, ierr)
     CALL VecDestroy(vx, ierr)
+    IF (pmat_created) CALL MatDestroy(Pmat, ierr)
     CALL MatDestroy(A, ierr)
     DEALLOCATE(b_work)
     DEALLOCATE(zprobe, az)
