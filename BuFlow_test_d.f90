@@ -8033,6 +8033,7 @@ CONTAINS
     REAL(kind=8), INTENT(IN) :: v(n)
     REAL(kind=8), INTENT(OUT) :: av(n)
     INTEGER(kind=8) :: ncells, c, ii_bad
+    REAL(kind=8) :: max_abs_av
     REAL(kind=8) :: data_4d137d(1, 4), vnrm
     REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
     REAL(kind=8), PARAMETER :: v_zero = 1.0d-280
@@ -8055,14 +8056,16 @@ CONTAINS
       av((c - 1)*5 + 1:(c - 1)*5 + 5) = fluxresiduals_slnd(c, 1:5)
     END DO
     ii_bad = 0_8
+    max_abs_av = 0.0_8
     DO c = 1_8, n
-      IF (av(c) /= av(c) .OR. ABS(av(c)) > 1.0d300) THEN
+      max_abs_av = MAX(max_abs_av, ABS(av(c)))
+      IF (av(c) /= av(c) .OR. ABS(av(c)) > 1.0d120) THEN
         IF (ii_bad == 0_8) ii_bad = c
         av(c) = 0.0_8
       END IF
     END DO
     IF (ii_bad > 0_8) THEN
-      PRINT *, '[TANGENT_MATVEC] sanitized non-finite output, first idx=', ii_bad
+      PRINT *, '[TANGENT_MATVEC] sanitized unstable output, first idx=', ii_bad, ' max|av_raw|=', max_abs_av
     END IF
     DEALLOCATE(cellprimitivesd)
   END SUBROUTINE TANGENT_MATVEC

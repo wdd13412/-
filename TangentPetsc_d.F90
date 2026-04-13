@@ -1,8 +1,9 @@
 MODULE TANGENT_PETSC_MODULE
 #include <petsc/finclude/petscksp.h>
   USE petscksp
-  USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC, fluxresiduals_slnd
-  USE TYPESMODULE_DIFF, ONLY: point_updated
+  USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC
+  USE TYPESMODULE_DIFF, ONLY: point_updated, fluxresiduals_slnd, facefluxes_slnd, &
+ & cellfluxes_slnd, cellstate_slnd, cellprimitives_slnd
   IMPLICIT NONE
 
   LOGICAL, SAVE :: petsc_initialized_local = .FALSE.
@@ -14,6 +15,11 @@ MODULE TANGENT_PETSC_MODULE
   PetscInt, ALLOCATABLE, SAVE :: tangent_idx(:)
   REAL(kind=8), ALLOCATABLE, SAVE :: tangent_work_x(:), tangent_work_y(:)
   PetscScalar, ALLOCATABLE, SAVE :: tangent_work_xvals(:), tangent_work_yvals(:)
+  LOGICAL, SAVE :: tangent_baseline_ready = .FALSE.
+  REAL(kind=8), ALLOCATABLE, SAVE :: baseline_fluxres(:,:), baseline_faceflux(:,:), baseline_cellflux(:,:)
+  REAL(kind=8), ALLOCATABLE, SAVE :: baseline_cellstate(:,:), baseline_cellprim(:,:)
+  REAL(kind=8), ALLOCATABLE, SAVE :: stack_fluxres(:,:), stack_faceflux(:,:), stack_cellflux(:,:)
+  REAL(kind=8), ALLOCATABLE, SAVE :: stack_cellstate(:,:), stack_cellprim(:,:)
 
 CONTAINS
 
@@ -35,6 +41,126 @@ CONTAINS
      &         tangent_work_xvals(nloc), tangent_work_yvals(nloc))
     END IF
   END SUBROUTINE ENSURE_TANGENT_WORKSPACE
+
+  SUBROUTINE ENSURE_2D_SHAPE(buf, n1, n2)
+    IMPLICIT NONE
+    REAL(kind=8), ALLOCATABLE, INTENT(INOUT) :: buf(:, :)
+    INTEGER, INTENT(IN) :: n1, n2
+    IF (.NOT. ALLOCATED(buf) .OR. SIZE(buf,1) /= n1 .OR. SIZE(buf,2) /= n2) THEN
+      IF (ALLOCATED(buf)) DEALLOCATE(buf)
+      ALLOCATE(buf(n1, n2))
+    END IF
+  END SUBROUTINE ENSURE_2D_SHAPE
+
+  SUBROUTINE TANGENT_SANDBOX_CAPTURE_BASELINE()
+    IMPLICIT NONE
+    IF (ALLOCATED(fluxresiduals_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(baseline_fluxres, SIZE(fluxresiduals_slnd,1), SIZE(fluxresiduals_slnd,2))
+      baseline_fluxres = fluxresiduals_slnd
+    END IF
+    IF (ALLOCATED(facefluxes_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(baseline_faceflux, SIZE(facefluxes_slnd,1), SIZE(facefluxes_slnd,2))
+      baseline_faceflux = facefluxes_slnd
+    END IF
+    IF (ALLOCATED(cellfluxes_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(baseline_cellflux, SIZE(cellfluxes_slnd,1), SIZE(cellfluxes_slnd,2))
+      baseline_cellflux = cellfluxes_slnd
+    END IF
+    IF (ALLOCATED(cellstate_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(baseline_cellstate, SIZE(cellstate_slnd,1), SIZE(cellstate_slnd,2))
+      baseline_cellstate = cellstate_slnd
+    END IF
+    IF (ALLOCATED(cellprimitives_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(baseline_cellprim, SIZE(cellprimitives_slnd,1), SIZE(cellprimitives_slnd,2))
+      baseline_cellprim = cellprimitives_slnd
+    END IF
+    tangent_baseline_ready = .TRUE.
+  END SUBROUTINE TANGENT_SANDBOX_CAPTURE_BASELINE
+
+  SUBROUTINE TANGENT_SANDBOX_PUSH()
+    IMPLICIT NONE
+    IF (ALLOCATED(fluxresiduals_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(stack_fluxres, SIZE(fluxresiduals_slnd,1), SIZE(fluxresiduals_slnd,2))
+      stack_fluxres = fluxresiduals_slnd
+    END IF
+    IF (ALLOCATED(facefluxes_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(stack_faceflux, SIZE(facefluxes_slnd,1), SIZE(facefluxes_slnd,2))
+      stack_faceflux = facefluxes_slnd
+    END IF
+    IF (ALLOCATED(cellfluxes_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(stack_cellflux, SIZE(cellfluxes_slnd,1), SIZE(cellfluxes_slnd,2))
+      stack_cellflux = cellfluxes_slnd
+    END IF
+    IF (ALLOCATED(cellstate_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(stack_cellstate, SIZE(cellstate_slnd,1), SIZE(cellstate_slnd,2))
+      stack_cellstate = cellstate_slnd
+    END IF
+    IF (ALLOCATED(cellprimitives_slnd)) THEN
+      CALL ENSURE_2D_SHAPE(stack_cellprim, SIZE(cellprimitives_slnd,1), SIZE(cellprimitives_slnd,2))
+      stack_cellprim = cellprimitives_slnd
+    END IF
+  END SUBROUTINE TANGENT_SANDBOX_PUSH
+
+  SUBROUTINE TANGENT_SANDBOX_APPLY_BASELINE()
+    IMPLICIT NONE
+    IF (.NOT. tangent_baseline_ready) RETURN
+    IF (ALLOCATED(fluxresiduals_slnd) .AND. ALLOCATED(baseline_fluxres)) THEN
+      IF (SIZE(fluxresiduals_slnd,1) == SIZE(baseline_fluxres,1) .AND. SIZE(fluxresiduals_slnd,2) == SIZE(baseline_fluxres,2)) THEN
+        fluxresiduals_slnd = baseline_fluxres
+      END IF
+    END IF
+    IF (ALLOCATED(facefluxes_slnd) .AND. ALLOCATED(baseline_faceflux)) THEN
+      IF (SIZE(facefluxes_slnd,1) == SIZE(baseline_faceflux,1) .AND. SIZE(facefluxes_slnd,2) == SIZE(baseline_faceflux,2)) THEN
+        facefluxes_slnd = baseline_faceflux
+      END IF
+    END IF
+    IF (ALLOCATED(cellfluxes_slnd) .AND. ALLOCATED(baseline_cellflux)) THEN
+      IF (SIZE(cellfluxes_slnd,1) == SIZE(baseline_cellflux,1) .AND. SIZE(cellfluxes_slnd,2) == SIZE(baseline_cellflux,2)) THEN
+        cellfluxes_slnd = baseline_cellflux
+      END IF
+    END IF
+    IF (ALLOCATED(cellstate_slnd) .AND. ALLOCATED(baseline_cellstate)) THEN
+      IF (SIZE(cellstate_slnd,1) == SIZE(baseline_cellstate,1) .AND. SIZE(cellstate_slnd,2) == SIZE(baseline_cellstate,2)) THEN
+        cellstate_slnd = baseline_cellstate
+      END IF
+    END IF
+    IF (ALLOCATED(cellprimitives_slnd) .AND. ALLOCATED(baseline_cellprim)) THEN
+      IF (SIZE(cellprimitives_slnd,1) == SIZE(baseline_cellprim,1) .AND. &
+     &    SIZE(cellprimitives_slnd,2) == SIZE(baseline_cellprim,2)) THEN
+        cellprimitives_slnd = baseline_cellprim
+      END IF
+    END IF
+  END SUBROUTINE TANGENT_SANDBOX_APPLY_BASELINE
+
+  SUBROUTINE TANGENT_SANDBOX_POP()
+    IMPLICIT NONE
+    IF (ALLOCATED(fluxresiduals_slnd) .AND. ALLOCATED(stack_fluxres)) THEN
+      IF (SIZE(fluxresiduals_slnd,1) == SIZE(stack_fluxres,1) .AND. SIZE(fluxresiduals_slnd,2) == SIZE(stack_fluxres,2)) THEN
+        fluxresiduals_slnd = stack_fluxres
+      END IF
+    END IF
+    IF (ALLOCATED(facefluxes_slnd) .AND. ALLOCATED(stack_faceflux)) THEN
+      IF (SIZE(facefluxes_slnd,1) == SIZE(stack_faceflux,1) .AND. SIZE(facefluxes_slnd,2) == SIZE(stack_faceflux,2)) THEN
+        facefluxes_slnd = stack_faceflux
+      END IF
+    END IF
+    IF (ALLOCATED(cellfluxes_slnd) .AND. ALLOCATED(stack_cellflux)) THEN
+      IF (SIZE(cellfluxes_slnd,1) == SIZE(stack_cellflux,1) .AND. SIZE(cellfluxes_slnd,2) == SIZE(stack_cellflux,2)) THEN
+        cellfluxes_slnd = stack_cellflux
+      END IF
+    END IF
+    IF (ALLOCATED(cellstate_slnd) .AND. ALLOCATED(stack_cellstate)) THEN
+      IF (SIZE(cellstate_slnd,1) == SIZE(stack_cellstate,1) .AND. SIZE(cellstate_slnd,2) == SIZE(stack_cellstate,2)) THEN
+        cellstate_slnd = stack_cellstate
+      END IF
+    END IF
+    IF (ALLOCATED(cellprimitives_slnd) .AND. ALLOCATED(stack_cellprim)) THEN
+      IF (SIZE(cellprimitives_slnd,1) == SIZE(stack_cellprim,1) .AND. &
+     &    SIZE(cellprimitives_slnd,2) == SIZE(stack_cellprim,2)) THEN
+        cellprimitives_slnd = stack_cellprim
+      END IF
+    END IF
+  END SUBROUTINE TANGENT_SANDBOX_POP
 
   SUBROUTINE TANGENT_MATVEC_WRAP(nloc, xin, yout)
     IMPLICIT NONE
@@ -75,6 +201,7 @@ CONTAINS
     INTEGER(kind=8) :: nloc, i
     LOGICAL :: had_bad
     REAL(kind=8) :: xin_norm, yout_norm, flux_pre, flux_post, point_pre, point_post
+    REAL(kind=8) :: max_abs_raw
 
     ierr = 0
     nloc = tangent_n_ctx
@@ -98,7 +225,7 @@ CONTAINS
 
     had_bad = .FALSE.
     DO i = 1_8, nloc
-      IF (tangent_work_x(i) /= tangent_work_x(i) .OR. ABS(tangent_work_x(i)) > 1.0d300) THEN
+      IF (tangent_work_x(i) /= tangent_work_x(i) .OR. ABS(tangent_work_x(i)) > 1.0d120) THEN
         tangent_work_x(i) = 0.0_8
         had_bad = .TRUE.
       END IF
@@ -110,15 +237,20 @@ CONTAINS
     point_post = -1.0_8
     IF (ALLOCATED(fluxresiduals_slnd)) flux_pre = SAFE_NORM2_2D(fluxresiduals_slnd)
     IF (ALLOCATED(point_updated)) point_pre = SAFE_NORM2_2D(point_updated)
+    CALL TANGENT_SANDBOX_PUSH()
+    CALL TANGENT_SANDBOX_APPLY_BASELINE()
     CALL TANGENT_MATVEC_WRAP(nloc, tangent_work_x, tangent_work_y)
+    CALL TANGENT_SANDBOX_POP()
     IF (ALLOCATED(fluxresiduals_slnd)) flux_post = SAFE_NORM2_2D(fluxresiduals_slnd)
     IF (ALLOCATED(point_updated)) point_post = SAFE_NORM2_2D(point_updated)
     IF (tangent_matmult_calls == 0_8) THEN
       PRINT *, '[PETSC-MATMULT-DBG] raw yout(1:5)=', tangent_work_y(1:MIN(5_8, nloc))
     END IF
 
+    max_abs_raw = 0.0_8
     DO i = 1_8, nloc
-      IF (tangent_work_y(i) /= tangent_work_y(i) .OR. ABS(tangent_work_y(i)) > 1.0d300) THEN
+      max_abs_raw = MAX(max_abs_raw, ABS(tangent_work_y(i)))
+      IF (tangent_work_y(i) /= tangent_work_y(i) .OR. ABS(tangent_work_y(i)) > 1.0d120) THEN
         IF (.NOT. had_bad .AND. tangent_matmult_calls <= 2_8) THEN
           PRINT *, '[PETSC-MATMULT-DBG] first bad yout idx=', i, ' value=', tangent_work_y(i)
         END IF
@@ -137,7 +269,9 @@ CONTAINS
       xin_norm = SQRT(SUM(tangent_work_x*tangent_work_x))
       yout_norm = SQRT(SUM(tangent_work_y*tangent_work_y))
       PRINT *, '[PETSC-MATMULT] call=', tangent_matmult_calls, ' ||x||=', xin_norm, ' ||Ax||=', yout_norm, ' sanitized=', had_bad
-      PRINT *, '[PETSC-SNAP] flux pre/post=', flux_pre, flux_post, ' point pre/post=', point_pre, point_post
+      PRINT *, '[PETSC-SNAP] flux pre/post=', flux_pre, flux_post, &
+     &         ' point pre/post=', point_pre, point_post, &
+     &         ' max|Ax_raw|=', max_abs_raw
     END IF
   END SUBROUTINE TANGENT_PETSC_MATMULT_IMPL
 
@@ -176,6 +310,8 @@ CONTAINS
     CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
     az_pre3 = SQRT(SUM(az*az))
     PRINT *, '[PETSC-PREINIT-3] ||A*0||=', az_pre3
+    CALL TANGENT_SANDBOX_CAPTURE_BASELINE()
+    PRINT *, '[PETSC-SANDBOX] baseline captured'
 
     IF (.NOT. petsc_initialized_local) THEN
       CALL PetscInitialize(ierr)
@@ -290,8 +426,23 @@ CONTAINS
     IF (ALLOCATED(tangent_data_ctx)) DEALLOCATE(tangent_data_ctx)
     IF (ALLOCATED(tangent_cell_ctx)) DEALLOCATE(tangent_cell_ctx)
     IF (ALLOCATED(tangent_idx)) DEALLOCATE(tangent_idx)
+    IF (ALLOCATED(tangent_work_x)) DEALLOCATE(tangent_work_x)
+    IF (ALLOCATED(tangent_work_y)) DEALLOCATE(tangent_work_y)
+    IF (ALLOCATED(tangent_work_xvals)) DEALLOCATE(tangent_work_xvals)
+    IF (ALLOCATED(tangent_work_yvals)) DEALLOCATE(tangent_work_yvals)
+    IF (ALLOCATED(baseline_fluxres)) DEALLOCATE(baseline_fluxres)
+    IF (ALLOCATED(baseline_faceflux)) DEALLOCATE(baseline_faceflux)
+    IF (ALLOCATED(baseline_cellflux)) DEALLOCATE(baseline_cellflux)
+    IF (ALLOCATED(baseline_cellstate)) DEALLOCATE(baseline_cellstate)
+    IF (ALLOCATED(baseline_cellprim)) DEALLOCATE(baseline_cellprim)
+    IF (ALLOCATED(stack_fluxres)) DEALLOCATE(stack_fluxres)
+    IF (ALLOCATED(stack_faceflux)) DEALLOCATE(stack_faceflux)
+    IF (ALLOCATED(stack_cellflux)) DEALLOCATE(stack_cellflux)
+    IF (ALLOCATED(stack_cellstate)) DEALLOCATE(stack_cellstate)
+    IF (ALLOCATED(stack_cellprim)) DEALLOCATE(stack_cellprim)
     tangent_idx_n = 0_8
     tangent_n_ctx = 0_8
+    tangent_baseline_ready = .FALSE.
   END SUBROUTINE TANGENT_PETSC_FINALIZE
 
 END MODULE TANGENT_PETSC_MODULE
