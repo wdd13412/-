@@ -8032,7 +8032,7 @@ CONTAINS
     INTEGER(kind=8), INTENT(IN) :: n
     REAL(kind=8), INTENT(IN) :: v(n)
     REAL(kind=8), INTENT(OUT) :: av(n)
-    INTEGER(kind=8) :: ncells, c
+    INTEGER(kind=8) :: ncells, c, ii_bad
     REAL(kind=8) :: data_4d137d(1, 4), vnrm
     REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
     REAL(kind=8), PARAMETER :: v_zero = 1.0d-280
@@ -8047,11 +8047,23 @@ CONTAINS
       cellprimitivesd(c, 1:5) = v((c - 1)*5 + 1:(c - 1)*5 + 5)
     END DO
     data_4d137d = 0.0_8
+    ! Defensive reset: avoid any stale derivative entry leaking into Av.
+    IF (ALLOCATED(fluxresiduals_slnd)) fluxresiduals_slnd = 0.0_8
     CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
     
     DO c = 1, ncells
       av((c - 1)*5 + 1:(c - 1)*5 + 5) = fluxresiduals_slnd(c, 1:5)
     END DO
+    ii_bad = 0_8
+    DO c = 1_8, n
+      IF (av(c) /= av(c) .OR. ABS(av(c)) > 1.0d300) THEN
+        IF (ii_bad == 0_8) ii_bad = c
+        av(c) = 0.0_8
+      END IF
+    END DO
+    IF (ii_bad > 0_8) THEN
+      PRINT *, '[TANGENT_MATVEC] sanitized non-finite output, first idx=', ii_bad
+    END IF
     DEALLOCATE(cellprimitivesd)
   END SUBROUTINE TANGENT_MATVEC
 

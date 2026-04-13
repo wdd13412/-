@@ -1,7 +1,8 @@
 MODULE TANGENT_PETSC_MODULE
 #include <petsc/finclude/petscksp.h>
   USE petscksp
-  USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC
+  USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC, fluxresiduals_slnd
+  USE TYPESMODULE_DIFF, ONLY: point_updated
   IMPLICIT NONE
 
   LOGICAL, SAVE :: petsc_initialized_local = .FALSE.
@@ -11,8 +12,29 @@ MODULE TANGENT_PETSC_MODULE
   REAL(kind=8), ALLOCATABLE, SAVE :: tangent_data_ctx(:, :)
   REAL(kind=8), ALLOCATABLE, SAVE :: tangent_cell_ctx(:, :)
   PetscInt, ALLOCATABLE, SAVE :: tangent_idx(:)
+  REAL(kind=8), ALLOCATABLE, SAVE :: tangent_work_x(:), tangent_work_y(:)
+  PetscScalar, ALLOCATABLE, SAVE :: tangent_work_xvals(:), tangent_work_yvals(:)
 
 CONTAINS
+
+  REAL(kind=8) FUNCTION SAFE_NORM2_2D(arr)
+    IMPLICIT NONE
+    REAL(kind=8), INTENT(IN) :: arr(:, :)
+    SAFE_NORM2_2D = SQRT(SUM(arr*arr))
+  END FUNCTION SAFE_NORM2_2D
+
+  SUBROUTINE ENSURE_TANGENT_WORKSPACE(nloc)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: nloc
+    IF (.NOT. ALLOCATED(tangent_work_x) .OR. SIZE(tangent_work_x) /= nloc) THEN
+      IF (ALLOCATED(tangent_work_x)) DEALLOCATE(tangent_work_x)
+      IF (ALLOCATED(tangent_work_y)) DEALLOCATE(tangent_work_y)
+      IF (ALLOCATED(tangent_work_xvals)) DEALLOCATE(tangent_work_xvals)
+      IF (ALLOCATED(tangent_work_yvals)) DEALLOCATE(tangent_work_yvals)
+      ALLOCATE(tangent_work_x(nloc), tangent_work_y(nloc), &
+     &         tangent_work_xvals(nloc), tangent_work_yvals(nloc))
+    END IF
+  END SUBROUTINE ENSURE_TANGENT_WORKSPACE
 
   SUBROUTINE TANGENT_MATVEC_WRAP(nloc, xin, yout)
     IMPLICIT NONE
@@ -50,11 +72,9 @@ CONTAINS
     Mat :: A
     Vec :: X, Y
     PetscErrorCode :: ierr
-    PetscScalar, ALLOCATABLE :: xvals(:), yvals(:)
-    REAL(kind=8), ALLOCATABLE :: xin(:), yout(:)
     INTEGER(kind=8) :: nloc, i
     LOGICAL :: had_bad
-    REAL(kind=8) :: xin_norm, yout_norm
+    REAL(kind=8) :: xin_norm, yout_norm, flux_pre, flux_post, point_pre, point_post
 
     ierr = 0
     nloc = tangent_n_ctx
@@ -64,51 +84,61 @@ CONTAINS
       ierr = 1
       RETURN
     END IF
-    ALLOCATE(xin(nloc), yout(nloc), xvals(nloc), yvals(nloc))
+    CALL ENSURE_TANGENT_WORKSPACE(nloc)
+    tangent_work_x = 0.0_8
+    tangent_work_y = 0.0_8
+    tangent_work_xvals = 0.0_8
+    tangent_work_yvals = 0.0_8
 
-    CALL VecGetValues(X, INT(nloc, kind=KIND(1)), tangent_idx, xvals, ierr)
+    CALL VecGetValues(X, INT(nloc, kind=KIND(1)), tangent_idx, tangent_work_xvals, ierr)
     IF (ierr /= 0) THEN
-      DEALLOCATE(xin, yout, xvals, yvals)
       RETURN
     END IF
-    xin = xvals
+    tangent_work_x = tangent_work_xvals
 
     had_bad = .FALSE.
     DO i = 1_8, nloc
-      IF (xin(i) /= xin(i) .OR. ABS(xin(i)) > 1.0d300) THEN
-        xin(i) = 0.0_8
+      IF (tangent_work_x(i) /= tangent_work_x(i) .OR. ABS(tangent_work_x(i)) > 1.0d300) THEN
+        tangent_work_x(i) = 0.0_8
         had_bad = .TRUE.
       END IF
     END DO
 
-    CALL TANGENT_MATVEC_WRAP(nloc, xin, yout)
+    flux_pre = -1.0_8
+    flux_post = -1.0_8
+    point_pre = -1.0_8
+    point_post = -1.0_8
+    IF (ALLOCATED(fluxresiduals_slnd)) flux_pre = SAFE_NORM2_2D(fluxresiduals_slnd)
+    IF (ALLOCATED(point_updated)) point_pre = SAFE_NORM2_2D(point_updated)
+    CALL TANGENT_MATVEC_WRAP(nloc, tangent_work_x, tangent_work_y)
+    IF (ALLOCATED(fluxresiduals_slnd)) flux_post = SAFE_NORM2_2D(fluxresiduals_slnd)
+    IF (ALLOCATED(point_updated)) point_post = SAFE_NORM2_2D(point_updated)
     IF (tangent_matmult_calls == 0_8) THEN
-      PRINT *, '[PETSC-MATMULT-DBG] raw yout(1:5)=', yout(1:MIN(5_8, nloc))
+      PRINT *, '[PETSC-MATMULT-DBG] raw yout(1:5)=', tangent_work_y(1:MIN(5_8, nloc))
     END IF
 
     DO i = 1_8, nloc
-      IF (yout(i) /= yout(i) .OR. ABS(yout(i)) > 1.0d300) THEN
+      IF (tangent_work_y(i) /= tangent_work_y(i) .OR. ABS(tangent_work_y(i)) > 1.0d300) THEN
         IF (.NOT. had_bad .AND. tangent_matmult_calls <= 2_8) THEN
-          PRINT *, '[PETSC-MATMULT-DBG] first bad yout idx=', i, ' value=', yout(i)
+          PRINT *, '[PETSC-MATMULT-DBG] first bad yout idx=', i, ' value=', tangent_work_y(i)
         END IF
-        yout(i) = 0.0_8
+        tangent_work_y(i) = 0.0_8
         had_bad = .TRUE.
       END IF
     END DO
 
-    yvals = yout
-    CALL VecSetValues(Y, INT(nloc, kind=KIND(1)), tangent_idx, yvals, INSERT_VALUES, ierr)
+    tangent_work_yvals = tangent_work_y
+    CALL VecSetValues(Y, INT(nloc, kind=KIND(1)), tangent_idx, tangent_work_yvals, INSERT_VALUES, ierr)
     CALL VecAssemblyBegin(Y, ierr)
     CALL VecAssemblyEnd(Y, ierr)
 
     tangent_matmult_calls = tangent_matmult_calls + 1_8
     IF (tangent_matmult_calls <= 3_8) THEN
-      xin_norm = SQRT(SUM(xin*xin))
-      yout_norm = SQRT(SUM(yout*yout))
+      xin_norm = SQRT(SUM(tangent_work_x*tangent_work_x))
+      yout_norm = SQRT(SUM(tangent_work_y*tangent_work_y))
       PRINT *, '[PETSC-MATMULT] call=', tangent_matmult_calls, ' ||x||=', xin_norm, ' ||Ax||=', yout_norm, ' sanitized=', had_bad
+      PRINT *, '[PETSC-SNAP] flux pre/post=', flux_pre, flux_post, ' point pre/post=', point_pre, point_post
     END IF
-
-    DEALLOCATE(xin, yout, xvals, yvals)
   END SUBROUTINE TANGENT_PETSC_MATMULT_IMPL
 
   SUBROUTINE SOLVE_TANGENT_PETSC_GMRES(data_4d137, cellprimitives, n, b, x, tol, maxiter, m_restart, info)
@@ -125,15 +155,21 @@ CONTAINS
     KSPConvergedReason :: reason
     PetscErrorCode :: ierr
     PetscInt :: n_petsc, max_it_petsc, restart_petsc, its, i
-    PetscReal :: rnorm, bnorm, xnorm0, axnorm0, axnormb
+    PetscReal :: rnorm, bnorm, xnorm0, axnorm0, axnormb, az_pre, az_post
     PetscInt, ALLOCATABLE :: idx(:)
     PetscScalar, ALLOCATABLE :: vals(:)
+    REAL(kind=8), ALLOCATABLE :: zprobe(:), az(:)
     EXTERNAL TANGENT_PETSC_MATMULT
 
     info = 2
     IF (n <= 0_8) RETURN
 
     CALL TANGENT_PETSC_SET_CONTEXT(data_4d137, cellprimitives, n)
+    ALLOCATE(zprobe(n), az(n))
+    zprobe = 0.0_8
+    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    az_pre = SQRT(SUM(az*az))
+    PRINT *, '[PETSC-PREINIT] ||A*0||=', az_pre
 
     IF (.NOT. petsc_initialized_local) THEN
       CALL PetscInitialize(PETSC_NULL_CHARACTER, ierr)
@@ -143,6 +179,9 @@ CONTAINS
       END IF
       petsc_initialized_local = .TRUE.
     END IF
+    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    az_post = SQRT(SUM(az*az))
+    PRINT *, '[PETSC-POSTINIT] ||A*0||=', az_post
 
     n_petsc = INT(n, KIND=KIND(n_petsc))
     max_it_petsc = INT(MAX(1_8, maxiter) * MAX(1_8, m_restart), KIND=KIND(max_it_petsc))
@@ -231,6 +270,7 @@ CONTAINS
     CALL VecDestroy(vb, ierr)
     CALL VecDestroy(vx, ierr)
     CALL MatDestroy(A, ierr)
+    DEALLOCATE(zprobe, az)
     DEALLOCATE(idx, vals)
   END SUBROUTINE SOLVE_TANGENT_PETSC_GMRES
 
