@@ -1,7 +1,8 @@
 MODULE TANGENT_PETSC_MODULE
 #include <petsc/finclude/petscksp.h>
   USE petscksp
-  USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC
+  USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC, APPLY_TANGENT_OPERATOR_WORK, &
+& APPLY_RESIDUAL_SCALING
   USE TYPESMODULE_DIFF, ONLY: point_updated, fluxresiduals_slnd, facefluxes_slnd, &
  & cellfluxes_slnd, cellstate_slnd, cellprimitives_slnd
   IMPLICIT NONE
@@ -15,6 +16,7 @@ MODULE TANGENT_PETSC_MODULE
   PetscInt, ALLOCATABLE, SAVE :: tangent_idx(:)
   REAL(kind=8), ALLOCATABLE, SAVE :: tangent_work_x(:), tangent_work_y(:)
   PetscScalar, ALLOCATABLE, SAVE :: tangent_work_xvals(:), tangent_work_yvals(:)
+  REAL(kind=8), ALLOCATABLE, SAVE :: tangent_work_dw(:)
   LOGICAL, SAVE :: tangent_baseline_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: baseline_fluxres(:,:), baseline_faceflux(:,:), baseline_cellflux(:,:)
   REAL(kind=8), ALLOCATABLE, SAVE :: baseline_cellstate(:,:), baseline_cellprim(:,:)
@@ -37,8 +39,10 @@ CONTAINS
       IF (ALLOCATED(tangent_work_y)) DEALLOCATE(tangent_work_y)
       IF (ALLOCATED(tangent_work_xvals)) DEALLOCATE(tangent_work_xvals)
       IF (ALLOCATED(tangent_work_yvals)) DEALLOCATE(tangent_work_yvals)
+      IF (ALLOCATED(tangent_work_dw)) DEALLOCATE(tangent_work_dw)
       ALLOCATE(tangent_work_x(nloc), tangent_work_y(nloc), &
-     &         tangent_work_xvals(nloc), tangent_work_yvals(nloc))
+     &         tangent_work_xvals(nloc), tangent_work_yvals(nloc), &
+     &         tangent_work_dw(nloc))
     END IF
   END SUBROUTINE ENSURE_TANGENT_WORKSPACE
 
@@ -239,7 +243,9 @@ CONTAINS
     IF (ALLOCATED(point_updated)) point_pre = SAFE_NORM2_2D(point_updated)
     CALL TANGENT_SANDBOX_PUSH()
     CALL TANGENT_SANDBOX_APPLY_BASELINE()
-    CALL TANGENT_MATVEC_WRAP(nloc, tangent_work_x, tangent_work_y)
+    CALL APPLY_TANGENT_OPERATOR_WORK(tangent_data_ctx, tangent_cell_ctx, nloc, &
+   &     tangent_work_x, 0.0_8, tangent_work_y, tangent_work_dw)
+    CALL APPLY_RESIDUAL_SCALING(tangent_work_y)
     CALL TANGENT_SANDBOX_POP()
     IF (ALLOCATED(fluxresiduals_slnd)) flux_post = SAFE_NORM2_2D(fluxresiduals_slnd)
     IF (ALLOCATED(point_updated)) point_post = SAFE_NORM2_2D(point_updated)
@@ -292,22 +298,28 @@ CONTAINS
     PetscReal :: rnorm, bnorm, xnorm0, axnorm0, axnormb, az_pre1, az_pre2, az_pre3, az_post
     PetscInt, ALLOCATABLE :: idx(:)
     PetscScalar, ALLOCATABLE :: vals(:)
-    REAL(kind=8), ALLOCATABLE :: zprobe(:), az(:)
+    REAL(kind=8), ALLOCATABLE :: zprobe(:), az(:), b_work(:)
     EXTERNAL TANGENT_PETSC_MATMULT
 
     info = 2
     IF (n <= 0_8) RETURN
 
     CALL TANGENT_PETSC_SET_CONTEXT(data_4d137, cellprimitives, n)
+    ALLOCATE(b_work(n))
+    b_work = b
+    CALL APPLY_RESIDUAL_SCALING(b_work)
     ALLOCATE(zprobe(n), az(n))
     zprobe = 0.0_8
-    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    CALL APPLY_TANGENT_OPERATOR_WORK(tangent_data_ctx, tangent_cell_ctx, n, zprobe, 0.0_8, az, tangent_work_dw)
+    CALL APPLY_RESIDUAL_SCALING(az)
     az_pre1 = SQRT(SUM(az*az))
     PRINT *, '[PETSC-PREINIT-1] ||A*0||=', az_pre1
-    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    CALL APPLY_TANGENT_OPERATOR_WORK(tangent_data_ctx, tangent_cell_ctx, n, zprobe, 0.0_8, az, tangent_work_dw)
+    CALL APPLY_RESIDUAL_SCALING(az)
     az_pre2 = SQRT(SUM(az*az))
     PRINT *, '[PETSC-PREINIT-2] ||A*0||=', az_pre2
-    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    CALL APPLY_TANGENT_OPERATOR_WORK(tangent_data_ctx, tangent_cell_ctx, n, zprobe, 0.0_8, az, tangent_work_dw)
+    CALL APPLY_RESIDUAL_SCALING(az)
     az_pre3 = SQRT(SUM(az*az))
     PRINT *, '[PETSC-PREINIT-3] ||A*0||=', az_pre3
     CALL TANGENT_SANDBOX_CAPTURE_BASELINE()
@@ -321,7 +333,8 @@ CONTAINS
       END IF
       petsc_initialized_local = .TRUE.
     END IF
-    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    CALL APPLY_TANGENT_OPERATOR_WORK(tangent_data_ctx, tangent_cell_ctx, n, zprobe, 0.0_8, az, tangent_work_dw)
+    CALL APPLY_RESIDUAL_SCALING(az)
     az_post = SQRT(SUM(az*az))
     PRINT *, '[PETSC-POSTINIT] ||A*0||=', az_post
 
@@ -348,7 +361,7 @@ CONTAINS
     DO i = 1, n_petsc
       idx(i) = i - 1
     END DO
-    vals = b(1:n)
+    vals = b_work(1:n)
     CALL VecSetValues(vb, n_petsc, idx, vals, INSERT_VALUES, ierr)
     IF (ierr /= 0) THEN
       PRINT *, '[PETSC] VecSetValues(vb) failed, ierr=', ierr
@@ -399,7 +412,7 @@ CONTAINS
     CALL VecGetValues(vx, n_petsc, idx, vals, ierr)
     x(1:n) = vals(1:n_petsc)
 
-    bnorm = SQRT(SUM(b*b))
+    bnorm = SQRT(SUM(b_work*b_work))
     PRINT *, '[PETSC-GMRES] reason=', reason, ' its=', its, ' true||r||/||b||=', rnorm / MAX(1.0d-30, bnorm)
 
     IF (reason > 0) THEN
@@ -412,6 +425,7 @@ CONTAINS
     CALL VecDestroy(vb, ierr)
     CALL VecDestroy(vx, ierr)
     CALL MatDestroy(A, ierr)
+    DEALLOCATE(b_work)
     DEALLOCATE(zprobe, az)
     DEALLOCATE(idx, vals)
   END SUBROUTINE SOLVE_TANGENT_PETSC_GMRES
@@ -430,6 +444,7 @@ CONTAINS
     IF (ALLOCATED(tangent_work_y)) DEALLOCATE(tangent_work_y)
     IF (ALLOCATED(tangent_work_xvals)) DEALLOCATE(tangent_work_xvals)
     IF (ALLOCATED(tangent_work_yvals)) DEALLOCATE(tangent_work_yvals)
+    IF (ALLOCATED(tangent_work_dw)) DEALLOCATE(tangent_work_dw)
     IF (ALLOCATED(baseline_fluxres)) DEALLOCATE(baseline_fluxres)
     IF (ALLOCATED(baseline_faceflux)) DEALLOCATE(baseline_faceflux)
     IF (ALLOCATED(baseline_cellflux)) DEALLOCATE(baseline_cellflux)
