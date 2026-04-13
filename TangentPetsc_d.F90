@@ -283,6 +283,194 @@ CONTAINS
     pmat_ready = .TRUE.
   END SUBROUTINE BUILD_PMAT_FROM_PC_BLOCKS
 
+  SUBROUTINE BUILD_PMAT_FROM_OPERATOR_COLORING(data_4d137, cellprimitives, nloc, Pmat, pmat_ready, ierr)
+    IMPLICIT NONE
+    REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
+    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+    INTEGER(kind=8), INTENT(IN) :: nloc
+    Mat, INTENT(OUT) :: Pmat
+    LOGICAL, INTENT(OUT) :: pmat_ready
+    PetscErrorCode, INTENT(OUT) :: ierr
+    INTEGER(kind=8) :: ncells, i, p, q, a, b, c, k, ir, color, max_color
+    INTEGER(kind=8) :: row_start, row_end, token, sel, nblkrow, nconflict
+    INTEGER(kind=8), ALLOCATABLE :: neigh_cnt(:), neigh_ptr(:), neigh_fill(:), neigh_ind(:), marks(:), colors(:)
+    INTEGER(kind=8), ALLOCATABLE :: color_cnt(:), color_ptr(:), color_fill(:), color_cells(:), used_color(:)
+    REAL(kind=8), ALLOCATABLE :: probe_x(:), probe_y(:), probe_dw(:)
+    PetscInt :: n_petsc
+    PetscInt, ALLOCATABLE :: d_nnz(:), row_idx(:), col_idx(:)
+    PetscScalar :: col_vals(5)
+
+    ierr = 0
+    pmat_ready = .FALSE.
+    nconflict = 0_8
+
+    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_diag_pos)) RETURN
+    ncells = SIZE(pc_diag_pos, kind=8)
+    IF (ncells <= 0_8) RETURN
+    IF (nloc /= 5_8 * ncells) RETURN
+    IF (SIZE(pc_row_ptr, kind=8) < ncells + 1_8) RETURN
+
+    n_petsc = INT(nloc, KIND=KIND(n_petsc))
+    ALLOCATE(d_nnz(n_petsc))
+    d_nnz = 1
+    DO c = 1_8, ncells
+      nblkrow = MAX(1_8, pc_row_ptr(c+1_8) - pc_row_ptr(c))
+      DO ir = 1_8, 5_8
+        d_nnz(INT((c-1_8)*5_8 + ir, KIND=KIND(d_nnz(1)))) = INT(5_8*nblkrow, KIND=KIND(d_nnz(1)))
+      END DO
+    END DO
+
+    CALL MatCreateSeqAIJ(PETSC_COMM_SELF, n_petsc, n_petsc, 0, d_nnz, Pmat, ierr)
+    DEALLOCATE(d_nnz)
+    IF (ierr /= 0) RETURN
+
+    ! Build column-conflict graph from block sparsity rows.
+    ALLOCATE(neigh_cnt(ncells), marks(ncells))
+    neigh_cnt = 0_8
+    marks = 0_8
+    DO i = 1_8, ncells
+      row_start = pc_row_ptr(i)
+      row_end = pc_row_ptr(i+1_8) - 1_8
+      DO p = row_start, row_end
+        a = pc_col_ind(p)
+        IF (a < 1_8 .OR. a > ncells) CYCLE
+        token = a
+        DO q = row_start, row_end
+          b = pc_col_ind(q)
+          IF (b < 1_8 .OR. b > ncells .OR. b == a) CYCLE
+          IF (marks(b) /= token) THEN
+            marks(b) = token
+            neigh_cnt(a) = neigh_cnt(a) + 1_8
+          END IF
+        END DO
+      END DO
+    END DO
+
+    ALLOCATE(neigh_ptr(ncells+1_8))
+    neigh_ptr(1) = 1_8
+    DO c = 1_8, ncells
+      neigh_ptr(c+1_8) = neigh_ptr(c) + neigh_cnt(c)
+    END DO
+    ALLOCATE(neigh_ind(MAX(1_8, neigh_ptr(ncells+1_8)-1_8)))
+    ALLOCATE(neigh_fill(ncells))
+    neigh_fill = neigh_ptr(1:ncells)
+    marks = 0_8
+    DO i = 1_8, ncells
+      row_start = pc_row_ptr(i)
+      row_end = pc_row_ptr(i+1_8) - 1_8
+      DO p = row_start, row_end
+        a = pc_col_ind(p)
+        IF (a < 1_8 .OR. a > ncells) CYCLE
+        token = a
+        DO q = row_start, row_end
+          b = pc_col_ind(q)
+          IF (b < 1_8 .OR. b > ncells .OR. b == a) CYCLE
+          IF (marks(b) /= token) THEN
+            marks(b) = token
+            neigh_ind(neigh_fill(a)) = b
+            neigh_fill(a) = neigh_fill(a) + 1_8
+          END IF
+        END DO
+      END DO
+    END DO
+    DEALLOCATE(neigh_fill, marks, neigh_cnt)
+
+    ! Greedy coloring on column-conflict graph.
+    ALLOCATE(colors(ncells), used_color(ncells))
+    colors = 0_8
+    used_color = 0_8
+    max_color = 0_8
+    DO c = 1_8, ncells
+      token = c
+      DO p = neigh_ptr(c), neigh_ptr(c+1_8)-1_8
+        b = neigh_ind(p)
+        IF (b < 1_8 .OR. b > ncells) CYCLE
+        IF (colors(b) > 0_8) used_color(colors(b)) = token
+      END DO
+      color = 1_8
+      DO WHILE (color <= max_color)
+        IF (used_color(color) /= token) EXIT
+        color = color + 1_8
+      END DO
+      IF (color > max_color) max_color = color
+      colors(c) = color
+    END DO
+
+    ALLOCATE(color_cnt(max_color), color_ptr(max_color+1_8), color_fill(max_color))
+    color_cnt = 0_8
+    DO c = 1_8, ncells
+      color_cnt(colors(c)) = color_cnt(colors(c)) + 1_8
+    END DO
+    color_ptr(1) = 1_8
+    DO color = 1_8, max_color
+      color_ptr(color+1_8) = color_ptr(color) + color_cnt(color)
+    END DO
+    ALLOCATE(color_cells(ncells))
+    color_fill = color_ptr(1:max_color)
+    DO c = 1_8, ncells
+      color = colors(c)
+      color_cells(color_fill(color)) = c
+      color_fill(color) = color_fill(color) + 1_8
+    END DO
+    DEALLOCATE(color_fill, color_cnt, used_color, neigh_ind, neigh_ptr)
+
+    ALLOCATE(probe_x(nloc), probe_y(nloc), probe_dw(nloc))
+    ALLOCATE(row_idx(5), col_idx(1))
+    probe_x = 0.0_8
+    probe_y = 0.0_8
+    probe_dw = 0.0_8
+
+    DO k = 1_8, 5_8
+      DO color = 1_8, max_color
+        probe_x = 0.0_8
+        DO p = color_ptr(color), color_ptr(color+1_8)-1_8
+          c = color_cells(p)
+          probe_x((c-1_8)*5_8 + k) = 1.0_8
+        END DO
+
+        CALL TANGENT_SANDBOX_PUSH()
+        CALL TANGENT_SANDBOX_APPLY_BASELINE()
+        CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, nloc, probe_x, 0.0_8, probe_y, probe_dw)
+        CALL APPLY_RESIDUAL_SCALING(probe_y)
+        CALL TANGENT_SANDBOX_POP()
+
+        DO i = 1_8, ncells
+          sel = 0_8
+          DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+            b = pc_col_ind(p)
+            IF (b < 1_8 .OR. b > ncells) CYCLE
+            IF (colors(b) == color) THEN
+              IF (sel /= 0_8) nconflict = nconflict + 1_8
+              sel = b
+            END IF
+          END DO
+          IF (sel == 0_8) CYCLE
+
+          col_idx(1) = INT((sel-1_8)*5_8 + (k-1_8), KIND=KIND(col_idx(1)))
+          DO ir = 1_8, 5_8
+            row_idx(ir) = INT((i-1_8)*5_8 + (ir-1_8), KIND=KIND(row_idx(ir)))
+            col_vals(ir) = probe_y((i-1_8)*5_8 + ir)
+          END DO
+          CALL MatSetValues(Pmat, 5, row_idx, 1, col_idx, col_vals, INSERT_VALUES, ierr)
+          IF (ierr /= 0) THEN
+            DEALLOCATE(colors, color_ptr, color_cells, probe_x, probe_y, probe_dw, row_idx, col_idx)
+            RETURN
+          END IF
+        END DO
+      END DO
+    END DO
+
+    CALL MatAssemblyBegin(Pmat, MAT_FINAL_ASSEMBLY, ierr)
+    IF (ierr /= 0) RETURN
+    CALL MatAssemblyEnd(Pmat, MAT_FINAL_ASSEMBLY, ierr)
+    IF (ierr /= 0) RETURN
+
+    PRINT *, '[PETSC-PMAT-COLOR] colors=', max_color, ' conflicts=', nconflict
+    pmat_ready = .TRUE.
+
+    DEALLOCATE(colors, color_ptr, color_cells, probe_x, probe_y, probe_dw, row_idx, col_idx)
+  END SUBROUTINE BUILD_PMAT_FROM_OPERATOR_COLORING
+
   SUBROUTINE TANGENT_PETSC_MATMULT_IMPL(A, X, Y, ierr)
     IMPLICIT NONE
     Mat :: A, Pmat
@@ -441,14 +629,23 @@ CONTAINS
       CALL MatDestroy(A, ierr)
       RETURN
     END IF
-    CALL BUILD_PMAT_FROM_PC_BLOCKS(n, Pmat, pmat_ready, ierr)
+    CALL BUILD_PMAT_FROM_OPERATOR_COLORING(tangent_data_ctx, tangent_cell_ctx, n, Pmat, pmat_ready, ierr)
     IF (ierr == 0 .AND. pmat_ready) THEN
       pmat_created = .TRUE.
-      PRINT *, '[PETSC-PMAT] using explicit AIJ Pmat from PC blocks'
+      PRINT *, '[PETSC-PMAT] using explicit AIJ Pmat from operator-coloring'
     ELSE
       pmat_ready = .FALSE.
       ierr = 0
-      PRINT *, '[PETSC-PMAT] fallback: no explicit Pmat available'
+      PRINT *, '[PETSC-PMAT] fallback: try PC-block Pmat'
+      CALL BUILD_PMAT_FROM_PC_BLOCKS(n, Pmat, pmat_ready, ierr)
+      IF (ierr == 0 .AND. pmat_ready) THEN
+        pmat_created = .TRUE.
+        PRINT *, '[PETSC-PMAT] using explicit AIJ Pmat from PC blocks'
+      ELSE
+        pmat_ready = .FALSE.
+        ierr = 0
+        PRINT *, '[PETSC-PMAT] fallback: no explicit Pmat available'
+      END IF
     END IF
 
     CALL VecCreateSeq(PETSC_COMM_SELF, n_petsc, vb, ierr)
