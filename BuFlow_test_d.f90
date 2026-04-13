@@ -243,6 +243,14 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: use_conservative_unknown_operator = .FALSE.
   LOGICAL, SAVE :: use_primitive_residual_operator = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: operator_transform_tmp(:)
+  ! ===== recycle-subspace storage (literature route: augmented restarted GMRES) =====
+  LOGICAL, SAVE :: gmres_recycle_enabled = .TRUE.
+  INTEGER(kind=8), SAVE :: gmres_recycle_max_vecs = 6_8
+  INTEGER(kind=8), SAVE :: gmres_recycle_n = 0_8
+  INTEGER(kind=8), SAVE :: gmres_recycle_cols = 0_8
+  REAL(kind=8), SAVE :: gmres_recycle_min_norm = 1.0d-12
+  REAL(kind=8), ALLOCATABLE, SAVE :: gmres_recycle_p(:, :)   ! search vectors in solver unknown space
+  REAL(kind=8), ALLOCATABLE, SAVE :: gmres_recycle_ap(:, :)  ! A*p for zero-shift operator
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 CONTAINS
@@ -8138,20 +8146,23 @@ CONTAINS
 
 	  REAL(kind=8), ALLOCATABLE :: r(:), v(:, :), w(:), h(:, :), y(:), z(:), tmp(:)
 	  REAL(kind=8), ALLOCATABLE :: r_lin(:), r_work(:), x_work(:), q_tmp(:), q_inv_tmp(:)
+	  REAL(kind=8), ALLOCATABLE :: rec_mat(:,:), rec_alpha(:), rec_ap(:,:), p_new(:), ap_new(:)
 	  REAL(kind=8) :: bnrm, rnrm_true, tol_b, beta_kry, res_ls, &
   xnrm_old, xnrm_new, znrm, rcheck, v1norm
       REAL(kind=8) :: eta_k, eta_prev, tol_b_k, phi_exp
  	  REAL(kind=8) :: eps_reg
-	  INTEGER(kind=8) :: k, j, m_dim, i
-	  INTEGER :: mm, nn, nrhs, info_ls, lwk
+	  INTEGER(kind=8) :: k, j, m_dim, i, rec_k, rec_pos
+	  INTEGER :: mm, nn, nrhs, info_ls, lwk, mm_rec, nn_rec, info_rec, lwk_rec
 	  DOUBLE PRECISION, ALLOCATABLE :: A_ls(:,:), b_ls(:), work_ls(:), resid(:)
+	  DOUBLE PRECISION, ALLOCATABLE :: A_rec_ls(:,:), b_rec_ls(:), work_rec_ls(:)
 	  REAL(kind=8) :: ynrm, tmpnrm, xnrm, drel
 	  LOGICAL, SAVE :: diag_done = .FALSE.
 	  REAL(kind=8) :: resid1, sum_h1y, h1norm
 	  REAL(kind=8) :: delta_w_norm, r_old_norm
 	  REAL(kind=8) :: Hy_norm, hy_i
 	  REAL(kind=8) :: v1_norm_dbg, Av1_norm_dbg, h11_dbg, h21_dbg, dot12_dbg, v2_norm_dbg
-	  REAL(kind=8) :: sigma_ptc, sigma_rel, rnrm_prev_outer, outer_ratio, ptc_step_omega, outer_ratio_eta
+	  REAL(kind=8) :: sigma_ptc, sigma_rel, rnrm_prev_outer, rnrm_before_update, outer_ratio, ptc_step_omega, outer_ratio_eta
+	  REAL(kind=8) :: rnrm_aug_before, rnrm_aug_after, pnorm
 
 	  INTRINSIC SQRT, ABS, SUM, MIN
 
@@ -8172,6 +8183,24 @@ CONTAINS
 	  ELSE
 		x_work = x
 	  END IF
+	  IF (.NOT. gmres_recycle_enabled) gmres_recycle_cols = 0_8
+	  IF (gmres_recycle_enabled .AND. gmres_recycle_max_vecs > 0_8) THEN
+		IF (gmres_recycle_n /= n .OR. .NOT. ALLOCATED(gmres_recycle_p) .OR. &
+	&       SIZE(gmres_recycle_p, 2) /= INT(gmres_recycle_max_vecs)) THEN
+		  IF (ALLOCATED(gmres_recycle_p)) DEALLOCATE(gmres_recycle_p)
+		  IF (ALLOCATED(gmres_recycle_ap)) DEALLOCATE(gmres_recycle_ap)
+		  ALLOCATE(gmres_recycle_p(n, gmres_recycle_max_vecs), gmres_recycle_ap(n, gmres_recycle_max_vecs))
+		  gmres_recycle_p = 0.0_8
+		  gmres_recycle_ap = 0.0_8
+		  gmres_recycle_n = n
+		  gmres_recycle_cols = 0_8
+		END IF
+	  ELSE
+		IF (ALLOCATED(gmres_recycle_p)) DEALLOCATE(gmres_recycle_p)
+		IF (ALLOCATED(gmres_recycle_ap)) DEALLOCATE(gmres_recycle_ap)
+		gmres_recycle_n = 0_8
+		gmres_recycle_cols = 0_8
+	  END IF
 
 	  ! ---------- 初始真殘差 r = b - A*x ----------
 	  bnrm = SQRT(SUM(b*b))
@@ -8184,12 +8213,7 @@ CONTAINS
 !	  eps_reg = 5.0d-8 * bnrm!1.0d-4
 !	  PRINT *, '[REG] eps_reg=', eps_reg, ' eps_reg/||b||=', eps_reg/bnrm
       !!!!!!!
-	  IF (use_conservative_unknown_operator) THEN
-		CALL APPLY_DU_TO_DW(cellprimitives, x_work, q_inv_tmp)
-		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, q_inv_tmp, w)
-	  ELSE
-		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x_work, w)
-	  END IF
+	  CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, x_work, 0.0_8, w, q_inv_tmp)
 	  PRINT *, '[GMRES-DBG] init x-norm=', SQRT(SUM(x_work*x_work))
 	  PRINT *, '[GMRES-DBG] init w-norm=', SQRT(SUM(w*w))
 	  PRINT *, '[GMRES-DBG] init b-norm=', bnrm
@@ -8299,6 +8323,47 @@ CONTAINS
 		  &       ' sigma=', sigma_ptc, ' omega=', ptc_step_omega, ' eta=', eta_k
 		END IF
 		PRINT *, '[GMRES-DBG] outer=', k, ' sigma_ptc=', sigma_ptc, ' diag_mean=', pc_a0_diag_mean
+		IF (gmres_recycle_enabled .AND. gmres_recycle_cols > 0_8) THEN
+		  rnrm_aug_before = rnrm_true
+		  rec_k = gmres_recycle_cols
+		  mm_rec = INT(n)
+		  nn_rec = INT(rec_k)
+		  ALLOCATE(rec_mat(n, rec_k), rec_ap(n, rec_k), rec_alpha(rec_k))
+		  rec_ap = gmres_recycle_ap(1:n, 1:rec_k)
+		  IF (sigma_ptc > 0.0_8) rec_ap = rec_ap + sigma_ptc * gmres_recycle_p(1:n, 1:rec_k)
+		  rec_mat = rec_ap
+		  ALLOCATE(A_rec_ls(mm_rec, nn_rec), b_rec_ls(MAX(mm_rec, nn_rec)), work_rec_ls(1))
+		  A_rec_ls = rec_mat
+		  b_rec_ls = 0.0d0
+		  b_rec_ls(1:mm_rec) = r(1:n)
+		  CALL DGELS('N', mm_rec, nn_rec, 1, A_rec_ls, mm_rec, b_rec_ls, mm_rec, work_rec_ls, -1, info_rec)
+		  lwk_rec = MAX(1, INT(CEILING(work_rec_ls(1))))
+		  DEALLOCATE(work_rec_ls)
+		  ALLOCATE(work_rec_ls(lwk_rec))
+		  A_rec_ls = rec_mat
+		  b_rec_ls = 0.0d0
+		  b_rec_ls(1:mm_rec) = r(1:n)
+		  CALL DGELS('N', mm_rec, nn_rec, 1, A_rec_ls, mm_rec, b_rec_ls, mm_rec, work_rec_ls, lwk_rec, info_rec)
+		  rec_alpha = REAL(b_rec_ls(1:nn_rec), kind=8)
+		  tmp(1:n) = MATMUL(gmres_recycle_p(1:n, 1:rec_k), rec_alpha)
+		  x_work(1:n) = x_work(1:n) + tmp(1:n)
+		  r(1:n) = r(1:n) - MATMUL(rec_ap(1:n, 1:rec_k), rec_alpha)
+		  rnrm_true = SQRT(SUM(r*r))
+		  rnrm_aug_after = rnrm_true
+		  PRINT *, '[GMRES-REC] outer=', k, ' cols=', rec_k, &
+	&       ' ||r||/||b||: ', rnrm_aug_before/bnrm, ' -> ', rnrm_aug_after/bnrm
+		  DEALLOCATE(A_rec_ls, b_rec_ls, work_rec_ls, rec_mat, rec_ap, rec_alpha)
+		  IF (rnrm_true <= tol_b) THEN
+			info = 0
+			IF (use_conservative_unknown_operator) THEN
+			  CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
+			ELSE
+			  x = x_work
+			END IF
+			DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
+			RETURN
+		  END IF
+		END IF
 
 		! 本輪 Krylov 的起始：beta = ||r||，v1 = r/||r||
 		beta_kry = rnrm_true
@@ -8337,8 +8402,7 @@ CONTAINS
 					 ' ||z||=', SQRT(SUM(z(1:n)*z(1:n)))
 		  END IF
 		  ! w = A * z ，matrix-free；A 對應 dR/dw 在當前線性化點
-		  CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, z, w)
-		  IF (sigma_ptc > 0.0_8) w(1:n) = w(1:n) + sigma_ptc * z(1:n)
+		  CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, z, sigma_ptc, w, q_inv_tmp)
 		  !!!!!!!!!正则化，待删/缺乏一个反回归
 !		  w(1:n) = w(1:n) + eps_reg * z(1:n)   ! (A + eps I) z
 		  !!!!!!!!!!
@@ -8459,10 +8523,10 @@ CONTAINS
 		END IF
 
 		! ===================== 解更新：右預條件下 x <- x + P^{-1} V y =====================
-		xnrm_old = SQRT(SUM(x(1:n)*x(1:n)))
+		xnrm_old = SQRT(SUM(x_work(1:n)*x_work(1:n)))
 		tmp(1:n) = MATMUL(v(1:n, 1:m_dim), y(1:m_dim))		
 		tmpnrm = SQRT(SUM(tmp(1:n)*tmp(1:n)))
-		xnrm   = SQRT(SUM(x(1:n)*x(1:n)))
+		xnrm   = SQRT(SUM(x_work(1:n)*x_work(1:n)))
 		drel   = tmpnrm / MAX(1.0d-300, xnrm)
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||tmp||=', tmpnrm, ' ||x||=', xnrm, ' ||tmp||/||x||=', drel
 		IF (pc_ready) THEN
@@ -8476,18 +8540,43 @@ CONTAINS
          (znrm / MAX(1.0d-300, xnrm_old))
         ! delta_x = z；檢查 A*delta_x 是否很小
 		r_old_norm = beta_kry   ! 因為你每個 restart 的 rnorm(start) 就是 beta_kry
-		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, z, w)
-		IF (sigma_ptc > 0.0_8) w(1:n) = w(1:n) + sigma_ptc * z(1:n)
+		CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, z, sigma_ptc, w, q_inv_tmp)
 		delta_w_norm = SQRT(SUM(w*w))
 
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||A*delta_x||=', delta_w_norm, &
 		&         ' ||r_old||=', r_old_norm, ' ratio=', delta_w_norm/ MAX(1.0d-300, r_old_norm)
-		x(1:n) = x(1:n) + ptc_step_omega * z(1:n)
-		xnrm_new = SQRT(SUM(x(1:n)*x(1:n)))
+		x_work(1:n) = x_work(1:n) + ptc_step_omega * z(1:n)
+		xnrm_new = SQRT(SUM(x_work(1:n)*x_work(1:n)))
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||x_new||=', xnrm_new
+		IF (gmres_recycle_enabled .AND. gmres_recycle_max_vecs > 0_8) THEN
+		  ALLOCATE(p_new(n), ap_new(n))
+		  p_new(1:n) = ptc_step_omega * z(1:n)
+		  IF (gmres_recycle_cols > 0_8) THEN
+			DO j = 1_8, gmres_recycle_cols
+			  drel = DOT_PRODUCT(gmres_recycle_p(1:n, j), p_new(1:n))
+			  p_new(1:n) = p_new(1:n) - drel * gmres_recycle_p(1:n, j)
+			END DO
+		  END IF
+		  pnorm = SQRT(SUM(p_new*p_new))
+		  IF (pnorm > gmres_recycle_min_norm) THEN
+			p_new = p_new / pnorm
+			CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, p_new, 0.0_8, ap_new, q_inv_tmp)
+			rec_pos = MIN(gmres_recycle_cols + 1_8, gmres_recycle_max_vecs)
+			IF (gmres_recycle_cols == gmres_recycle_max_vecs) THEN
+			  gmres_recycle_p(1:n, 1:gmres_recycle_max_vecs-1_8) = gmres_recycle_p(1:n, 2:gmres_recycle_max_vecs)
+			  gmres_recycle_ap(1:n, 1:gmres_recycle_max_vecs-1_8) = gmres_recycle_ap(1:n, 2:gmres_recycle_max_vecs)
+			ELSE
+			  gmres_recycle_cols = gmres_recycle_cols + 1_8
+			END IF
+			gmres_recycle_p(1:n, rec_pos) = p_new
+			gmres_recycle_ap(1:n, rec_pos) = ap_new
+		  END IF
+		  DEALLOCATE(p_new, ap_new)
+		END IF
 
 		! 真殘差
-		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x, w)
+		rnrm_before_update = rnrm_true
+		CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, x_work, 0.0_8, w, q_inv_tmp)
 		!!!!!正则化，待删/缺乏一个反回归
 !		w(1:n) = w(1:n) + eps_reg * x(1:n)
 		!!!!!
@@ -8497,7 +8586,7 @@ CONTAINS
 		  r = r_work
 		END IF
 		rnrm_true = SQRT(SUM(r*r))
-		rnrm_prev_outer = rnrm_true
+		rnrm_prev_outer = rnrm_before_update
 		PRINT *, '  [GMRES] outer=', k, ' true||r||=', rnrm_true, &
 &      ' true||r||/||b||=', rnrm_true/bnrm, ' eta_k=', eta_k, &
 &      ' converged=', (rnrm_true <= tol_b)
@@ -10874,6 +10963,25 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
         Jinv(1,1)=1.0_8; Jinv(2,2)=1.0_8; Jinv(3,3)=1.0_8; Jinv(4,4)=1.0_8; Jinv(5,5)=1.0_8
       END IF
     END SUBROUTINE BUILD_DUDW_INV_5X5
+
+  SUBROUTINE APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, vec_work, sigma_shift, vec_out, vec_tmp_dw)
+    IMPLICIT NONE
+    REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
+    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+    INTEGER(kind=8), INTENT(IN) :: n
+    REAL(kind=8), INTENT(IN) :: vec_work(:)
+    REAL(kind=8), INTENT(IN) :: sigma_shift
+    REAL(kind=8), INTENT(OUT) :: vec_out(:)
+    REAL(kind=8), INTENT(INOUT) :: vec_tmp_dw(:)
+
+    IF (use_conservative_unknown_operator) THEN
+      CALL APPLY_DU_TO_DW(cellprimitives, vec_work, vec_tmp_dw)
+      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_tmp_dw, vec_out)
+    ELSE
+      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_work, vec_out)
+    END IF
+    IF (sigma_shift > 0.0_8) vec_out(1:n) = vec_out(1:n) + sigma_shift * vec_work(1:n)
+  END SUBROUTINE APPLY_TANGENT_OPERATOR_WORK
 
   SUBROUTINE APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r_in, r_out)
     IMPLICIT NONE
