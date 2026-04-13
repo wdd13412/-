@@ -364,13 +364,13 @@ CONTAINS
     INTEGER, INTENT(OUT) :: info
 
     Mat :: A, Pmat
-    Vec :: vb, vx, vtmp
+    Vec :: vb, vx, vtmp, vr
     KSP :: ksp
     PC :: pc
     KSPConvergedReason :: reason
     PetscErrorCode :: ierr
     PetscInt :: n_petsc, max_it_petsc, restart_petsc, its, i
-    PetscReal :: rnorm, bnorm, xnorm0, axnorm0, axnormb, az_pre1, az_pre2, az_pre3, az_post
+    PetscReal :: rnorm, rnorm_true, bnorm, xnorm0, axnorm0, axnormb, az_pre1, az_pre2, az_pre3, az_post
     PetscInt, ALLOCATABLE :: idx(:)
     PetscScalar, ALLOCATABLE :: vals(:)
     REAL(kind=8), ALLOCATABLE :: zprobe(:), az(:), b_work(:)
@@ -503,8 +503,15 @@ CONTAINS
     CALL VecGetValues(vx, n_petsc, idx, vals, ierr)
     x(1:n) = vals(1:n_petsc)
 
+    CALL VecDuplicate(vb, vr, ierr)
+    CALL MatMult(A, vx, vr, ierr)
+    CALL VecAYPX(vr, -1.0d0, vb, ierr) ! vr = b - A*x
+    CALL VecNorm(vr, NORM_2, rnorm_true, ierr)
+    CALL VecDestroy(vr, ierr)
+
     bnorm = SQRT(SUM(b_work*b_work))
-    PRINT *, '[PETSC-GMRES] reason=', reason, ' its=', its, ' true||r||/||b||=', rnorm / MAX(1.0d-30, bnorm)
+    PRINT *, '[PETSC-GMRES] reason=', reason, ' its=', its, ' ksp||r||/||b||=', &
+   & rnorm / MAX(1.0d-30, bnorm), ' true||r||/||b||=', rnorm_true / MAX(1.0d-30, bnorm)
 
     IF (reason > 0) THEN
       info = 0
