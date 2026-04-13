@@ -348,10 +348,16 @@ CONTAINS
 								maxiter = 10
 								m_restart = 50
 								IF (use_petsc_tangent_solver_runtime) THEN
-								  ! Temporary stability fallback for PETSc path:
-								  ! disable conservative/primitive conversion that currently segfaults in MatMult.
-								  use_conservative_unknown_operator = .FALSE.
-								  pc_use_cons_right_transform = .FALSE.
+								  ! DAFoam-aligned PETSc path:
+								  ! keep unknown/operator space consistent and disable AM/two-level extras.
+								  use_conservative_unknown_operator = .TRUE.
+								  pc_use_cons_right_transform = .TRUE.
+								  pc_use_am1 = .FALSE.
+								  pc_use_am_poly = .FALSE.
+								  pc_use_two_level = .FALSE.
+								  pc_use_coarse_pv_schur = .FALSE.
+								  pc_use_pschur = .FALSE.
+								  pc_use_schur_split = .FALSE.
 								END IF
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8

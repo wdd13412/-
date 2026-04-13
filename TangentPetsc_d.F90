@@ -3,7 +3,8 @@ MODULE TANGENT_PETSC_MODULE
   USE petscksp
   USE BUFLOWMODULE_DIFF, ONLY: TANGENT_MATVEC, APPLY_TANGENT_OPERATOR_WORK, &
 & APPLY_RESIDUAL_SCALING, pc_row_ptr, pc_col_ind, pc_blk, pc_a0_blk, &
-& pc_a0_ready, pc_diag_pos
+& pc_a0_ready, pc_diag_pos, tangent_use_residual_scaling, &
+& tangent_res_scale_mass, tangent_res_scale_momentum, tangent_res_scale_energy
   USE TYPESMODULE_DIFF, ONLY: point_updated, fluxresiduals_slnd, facefluxes_slnd, &
  & cellfluxes_slnd, cellstate_slnd, cellprimitives_slnd
   IMPLICIT NONE
@@ -208,6 +209,7 @@ CONTAINS
     PetscInt :: n_petsc
     PetscInt, ALLOCATABLE :: d_nnz(:), row_idx(:), col_idx(:)
     PetscScalar :: row_vals(5)
+    REAL(kind=8) :: row_scale
     LOGICAL :: use_a0
 
     ierr = 0
@@ -247,11 +249,20 @@ CONTAINS
         END DO
         DO ir = 1_8, 5_8
           row_idx(1) = INT((c-1_8)*5_8 + (ir-1_8), KIND=KIND(row_idx(1)))
+          SELECT CASE (ir)
+          CASE (1_8)
+            row_scale = MAX(tangent_res_scale_mass, 1.0d-30)
+          CASE (2_8, 3_8, 4_8)
+            row_scale = MAX(tangent_res_scale_momentum, 1.0d-30)
+          CASE DEFAULT
+            row_scale = MAX(tangent_res_scale_energy, 1.0d-30)
+          END SELECT
+          IF (.NOT. tangent_use_residual_scaling) row_scale = 1.0d0
           DO jc = 1_8, 5_8
             IF (use_a0) THEN
-              row_vals(jc) = pc_a0_blk(p, ir, jc)
+              row_vals(jc) = pc_a0_blk(p, ir, jc) / row_scale
             ELSE
-              row_vals(jc) = pc_blk(p, ir, jc)
+              row_vals(jc) = pc_blk(p, ir, jc) / row_scale
             END IF
           END DO
           CALL MatSetValues(Pmat, 1, row_idx, 5, col_idx, row_vals, INSERT_VALUES, ierr)
@@ -486,6 +497,7 @@ CONTAINS
     ! Keep a safe default; actual KSP/PC is overridden from runtime options.
     CALL KSPSetType(ksp, KSPGMRES, ierr)
     CALL KSPGMRESSetRestart(ksp, restart_petsc, ierr)
+    CALL KSPSetPCSide(ksp, PC_RIGHT, ierr)
     CALL KSPGetPC(ksp, pc, ierr)
     CALL PCSetType(pc, PCNONE, ierr)
     CALL KSPSetTolerances(ksp, tol, PETSC_DEFAULT_REAL, PETSC_DEFAULT_REAL, max_it_petsc, ierr)
