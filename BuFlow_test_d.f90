@@ -240,7 +240,9 @@ MODULE BUFLOWMODULE_DIFF
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_off(:)       ! (nnzb) 仅邻接项，含对角位可复用
 	LOGICAL, SAVE :: pc_sp_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: point_updated_rhs(:, :)
+  LOGICAL, SAVE :: use_conservative_unknown_operator = .FALSE.
   LOGICAL, SAVE :: use_primitive_residual_operator = .FALSE.
+  REAL(kind=8), ALLOCATABLE, SAVE :: operator_transform_tmp(:)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 CONTAINS
@@ -8165,6 +8167,11 @@ CONTAINS
 	  ALLOCATE(r(n), v(n, m_restart+1), w(n), h(m_restart+1, m_restart), &
 	&          y(m_restart), z(n), tmp(n))
 	  ALLOCATE(r_lin(n), r_work(n), x_work(n), q_tmp(n), q_inv_tmp(n))
+	  IF (use_conservative_unknown_operator) THEN
+		CALL APPLY_DW_TO_DU(cellprimitives, x, x_work)
+	  ELSE
+		x_work = x
+	  END IF
 
 	  ! ---------- 初始真殘差 r = b - A*x ----------
 	  bnrm = SQRT(SUM(b*b))
@@ -8177,11 +8184,16 @@ CONTAINS
 !	  eps_reg = 5.0d-8 * bnrm!1.0d-4
 !	  PRINT *, '[REG] eps_reg=', eps_reg, ' eps_reg/||b||=', eps_reg/bnrm
       !!!!!!!
-	  CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x, w)
-	  PRINT *, '[GMRES-DBG] init x-norm=', SQRT(SUM(x*x))
+	  IF (use_conservative_unknown_operator) THEN
+		CALL APPLY_DU_TO_DW(cellprimitives, x_work, q_inv_tmp)
+		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, q_inv_tmp, w)
+	  ELSE
+		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x_work, w)
+	  END IF
+	  PRINT *, '[GMRES-DBG] init x-norm=', SQRT(SUM(x_work*x_work))
 	  PRINT *, '[GMRES-DBG] init w-norm=', SQRT(SUM(w*w))
 	  PRINT *, '[GMRES-DBG] init b-norm=', bnrm
-	  PRINT *, '[GMRES-DBG] init x(1:5)=', x(1:5)
+	  PRINT *, '[GMRES-DBG] init x(1:5)=', x_work(1:5)
 	  PRINT *, '[GMRES-DBG] init w(1:5)=', w(1:5)
 	  r = b - w
 	  IF (use_primitive_residual_operator) THEN
@@ -8232,7 +8244,12 @@ CONTAINS
 
 	  IF (rnrm_true <= tol_b) THEN
 		info = 0
-		DEALLOCATE(r, v, w, h, y, z, tmp)
+		IF (use_conservative_unknown_operator) THEN
+		  CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
+		ELSE
+		  x = x_work
+		END IF
+		DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 		RETURN
 	  END IF
 	  rnrm_prev_outer = rnrm_true
@@ -8291,7 +8308,12 @@ CONTAINS
          ' rnorm(start)/||b||=', rnrm_true / bnrm
 		IF (beta_kry < eps_small) THEN
 		  info = 0
-		  DEALLOCATE(r, v, w, h, y, z, tmp)
+		  IF (use_conservative_unknown_operator) THEN
+		    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
+		  ELSE
+		    x = x_work
+		  END IF
+		  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 		  RETURN
 		END IF
 		v(1:n, 1) = r / beta_kry
@@ -8355,7 +8377,7 @@ CONTAINS
 		IF (m_dim < 1) THEN
 		  info = 2
 		  PRINT *, '[GMRES] Arnoldi breakdown: m_dim=', m_dim
-		  DEALLOCATE(r, v, w, h, y, z, tmp)
+		  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 		  RETURN
 		END IF
 
@@ -8494,7 +8516,12 @@ CONTAINS
 
 		IF (rnrm_true <= tol_b) THEN
 		  info = 0
-		  DEALLOCATE(r, v, w, h, y, z, tmp)
+		  IF (use_conservative_unknown_operator) THEN
+		    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
+		  ELSE
+		    x = x_work
+		  END IF
+		  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 		  RETURN
 		END IF
 	  END DO
@@ -8504,8 +8531,12 @@ CONTAINS
 	  ELSE
 		info = 1
 	  END IF
-
-	  DEALLOCATE(r, v, w, h, y, z, tmp)
+	  IF (use_conservative_unknown_operator) THEN
+	    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
+	  ELSE
+	    x = x_work
+	  END IF
+	  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 
 	END SUBROUTINE SOLVE_TANGENT_JFGMRES
   SUBROUTINE OUTPUT_WALL_CP_CSV(meshpath, point_update, cellprimitives, &
@@ -10895,6 +10926,50 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
       r_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = rw
     END DO
   END SUBROUTINE APPLY_INV_PRIMITIVE_LEFT_TRANSFORM
+
+  SUBROUTINE APPLY_DW_TO_DU(cellprimitives, xw_in, xu_out)
+    IMPLICIT NONE
+    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+    REAL(kind=8), INTENT(IN) :: xw_in(:)
+    REAL(kind=8), INTENT(OUT) :: xu_out(:)
+    INTEGER(kind=8) :: c, ncells
+    REAL(kind=8) :: wp(5), J(5,5), xw(5), xu(5)
+    TYPE(FLUIDD) :: fluid
+    ncells = SIZE(cellprimitives, 1)
+    xu_out = 0.0_8
+    fluid%cp = 1005.0d0
+    fluid%r = 287.05d0
+    fluid%gammaa = 1.4d0
+    DO c = 1_8, ncells
+      wp(1:5) = cellprimitives(c, 1:5)
+      CALL BUILD_DUDW_5X5(wp, fluid, J)
+      xw(1:5) = xw_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
+      xu = MATMUL(J, xw)
+      xu_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xu
+    END DO
+  END SUBROUTINE APPLY_DW_TO_DU
+
+  SUBROUTINE APPLY_DU_TO_DW(cellprimitives, xu_in, xw_out)
+    IMPLICIT NONE
+    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+    REAL(kind=8), INTENT(IN) :: xu_in(:)
+    REAL(kind=8), INTENT(OUT) :: xw_out(:)
+    INTEGER(kind=8) :: c, ncells
+    REAL(kind=8) :: wp(5), Jinv(5,5), xu(5), xw(5)
+    TYPE(FLUIDD) :: fluid
+    ncells = SIZE(cellprimitives, 1)
+    xw_out = 0.0_8
+    fluid%cp = 1005.0d0
+    fluid%r = 287.05d0
+    fluid%gammaa = 1.4d0
+    DO c = 1_8, ncells
+      wp(1:5) = cellprimitives(c, 1:5)
+      CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
+      xu(1:5) = xu_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
+      xw = MATMUL(Jinv, xu)
+      xw_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xw
+    END DO
+  END SUBROUTINE APPLY_DU_TO_DW
 
 	SUBROUTINE SORT_UNIQUE_I8(arr, nout)
 	  IMPLICIT NONE
