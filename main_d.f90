@@ -4,6 +4,7 @@
 MODULE MAIN_MODULE_DIFF
   USE BUFLOWMODULE_DIFF
   USE MESHDEFORMATIONN_DIFF
+  USE TANGENT_PETSC_MODULE, ONLY: SOLVE_TANGENT_PETSC_GMRES, TANGENT_PETSC_FINALIZE
 !!!!!!!!!!      
 !!!!!!!!!!	 
   IMPLICIT NONE
@@ -346,6 +347,12 @@ CONTAINS
 								tol = 1.0d-8
 								maxiter = 10
 								m_restart = 50
+								IF (use_petsc_tangent_solver_runtime) THEN
+								  ! Temporary stability fallback for PETSc path:
+								  ! disable conservative/primitive conversion that currently segfaults in MatMult.
+								  use_conservative_unknown_operator = .FALSE.
+								  pc_use_cons_right_transform = .FALSE.
+								END IF
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8
 								CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)   ! 先建一次，保证本轮开着
@@ -382,8 +389,13 @@ CONTAINS
 									  pc_ptc_alpha = MIN(pc_ptc_alpha_max, MAX(pc_ptc_alpha_min, ptc_sigma))
 									  maxiter_stage = MAX(3_8, maxiter-1_8)
 									  ptc_dx = 0.0_8
-									  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, ptc_res, ptc_dx, &
-									& ptc_tol_stage, maxiter_stage, m_restart, info_stage)
+									  IF (use_petsc_tangent_solver_runtime) THEN
+										CALL SOLVE_TANGENT_PETSC_GMRES(data_4d137, cellprimitivesout, n, ptc_res, ptc_dx, &
+& ptc_tol_stage, maxiter_stage, m_restart, info_stage)
+									  ELSE
+										CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, ptc_res, ptc_dx, &
+& ptc_tol_stage, maxiter_stage, m_restart, info_stage)
+									  END IF
 									  x_tan = x_tan + ptc_omega_stage * ptc_dx
 
 									  CALL TANGENT_MATVEC(data_4d137, cellprimitivesout, n, x_tan, ptc_ax)
@@ -405,11 +417,19 @@ CONTAINS
 									! final polish on original system (sigma=0)
 									pc_use_ptc_shift = .FALSE.
 									CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)
-									CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									IF (use_petsc_tangent_solver_runtime) THEN
+									  CALL SOLVE_TANGENT_PETSC_GMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									ELSE
+									  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									END IF
 									DEALLOCATE(ptc_res, ptc_dx, ptc_ax)
 								  ELSE
 									!无雅可比矩阵GMRES方法(正向自动微分求解矩阵向量积)求解dw/dx
-									CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									IF (use_petsc_tangent_solver_runtime) THEN
+									  CALL SOLVE_TANGENT_PETSC_GMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									ELSE
+									  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
+									END IF
 								  END IF
 								  !x_tan表示的是一个变形参数的dw/dx,维度为（ncells*5）,dwdx表示的是四个变形参数的dw/dx，维度为（ncells*5，4）
 								  dwdx(1:n, i_param) = x_tan
@@ -429,6 +449,7 @@ CONTAINS
     							dwdx(1:n, 5) = 0.0_8
 								rhs_rho(1:ncells, 5) = 0.0_8!这里实际上是对mach的导数
     							PRINT *, 'Tangent param (Mach) GMRES info=', info
+								IF (use_petsc_tangent_solver_runtime) CALL TANGENT_PETSC_FINALIZE()
     							!输出vtk,csv
 								meshpath = TRIM(mesh_path_runtime)
 								CALL OUTPUT_WALL_CP_CSV(meshpath, point_update, cellprimitivesout, dwdx, ncells, 'wall_cp_data.csv')

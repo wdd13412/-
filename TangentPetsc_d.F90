@@ -393,7 +393,8 @@ CONTAINS
 
     CALL KSPCreate(PETSC_COMM_SELF, ksp, ierr)
     CALL KSPSetOperators(ksp, A, A, ierr)
-    CALL KSPSetType(ksp, KSPFGMRES, ierr)
+    ! Keep a safe default; actual KSP/PC is overridden from runtime options.
+    CALL KSPSetType(ksp, KSPGMRES, ierr)
     CALL KSPGMRESSetRestart(ksp, restart_petsc, ierr)
     CALL KSPGetPC(ksp, pc, ierr)
     CALL PCSetType(pc, PCNONE, ierr)

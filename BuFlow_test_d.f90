@@ -3507,8 +3507,8 @@ CONTAINS
     DO bdry=1,nboundaries
 ! 统计当前边界的非零元素个数
       i = 0
-      DO WHILE (i .LT. SIZE(boundaryfaces_mesh, 2) .AND. &
-&               boundaryfaces_mesh(bdry, i+1) .NE. 0)
+      DO WHILE (i .LT. SIZE(boundaryfaces_mesh, 2))
+        IF (boundaryfaces_mesh(bdry, i+1) .EQ. 0) EXIT
         i = i + 1
       END DO
       nbdryfaces = nbdryfaces + i
@@ -7418,16 +7418,19 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
+    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len = len_vec
+      vec_len_i8 = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len = SIZE(a)
+      vec_len_i8 = SIZE(a, kind=8)
     END IF
+    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8), SIZE(ad, kind=8), SIZE(bd, kind=8))
+    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     resultd = 0.0_8
@@ -7450,16 +7453,19 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
+    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len = len_vec
+      vec_len_i8 = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len = SIZE(a)
+      vec_len_i8 = SIZE(a, kind=8)
     END IF
+    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8), SIZE(ad, kind=8))
+    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     resultd = 0.0_8
@@ -7481,16 +7487,19 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
+    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len = len_vec
+      vec_len_i8 = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len = SIZE(a)
+      vec_len_i8 = SIZE(a, kind=8)
     END IF
+    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8))
+    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     DO i=1,vec_len
@@ -7510,16 +7519,19 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
+    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len = len_vec
+      vec_len_i8 = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len = SIZE(a)
+      vec_len_i8 = SIZE(a, kind=8)
     END IF
+    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8))
+    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     DO i=1,vec_len
@@ -11128,20 +11140,31 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
     REAL(kind=8), INTENT(IN) :: xw_in(:)
     REAL(kind=8), INTENT(OUT) :: xu_out(:)
-    INTEGER(kind=8) :: c, ncells
+    INTEGER(kind=8) :: c, ncells, nvec, base
     REAL(kind=8) :: wp(5), J(5,5), xw(5), xu(5)
     TYPE(FLUIDD) :: fluid
     ncells = SIZE(cellprimitives, 1)
     xu_out = 0.0_8
+    nvec = SIZE(xw_in)
     fluid%cp = 1005.0d0
     fluid%r = 287.05d0
     fluid%gammaa = 1.4d0
     DO c = 1_8, ncells
+      base = (c-1_8)*5_8
+      IF (base + 5_8 > nvec) EXIT
       wp(1:5) = cellprimitives(c, 1:5)
       CALL BUILD_DUDW_5X5(wp, fluid, J)
-      xw(1:5) = xw_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
+      xw(1) = xw_in(base + 1_8)
+      xw(2) = xw_in(base + 2_8)
+      xw(3) = xw_in(base + 3_8)
+      xw(4) = xw_in(base + 4_8)
+      xw(5) = xw_in(base + 5_8)
       xu = MATMUL(J, xw)
-      xu_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xu
+      xu_out(base + 1_8) = xu(1)
+      xu_out(base + 2_8) = xu(2)
+      xu_out(base + 3_8) = xu(3)
+      xu_out(base + 4_8) = xu(4)
+      xu_out(base + 5_8) = xu(5)
     END DO
   END SUBROUTINE APPLY_DW_TO_DU
 
@@ -11150,20 +11173,31 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
     REAL(kind=8), INTENT(IN) :: xu_in(:)
     REAL(kind=8), INTENT(OUT) :: xw_out(:)
-    INTEGER(kind=8) :: c, ncells
+    INTEGER(kind=8) :: c, ncells, nvec, base
     REAL(kind=8) :: wp(5), Jinv(5,5), xu(5), xw(5)
     TYPE(FLUIDD) :: fluid
     ncells = SIZE(cellprimitives, 1)
     xw_out = 0.0_8
+    nvec = SIZE(xu_in)
     fluid%cp = 1005.0d0
     fluid%r = 287.05d0
     fluid%gammaa = 1.4d0
     DO c = 1_8, ncells
+      base = (c-1_8)*5_8
+      IF (base + 5_8 > nvec) EXIT
       wp(1:5) = cellprimitives(c, 1:5)
       CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
-      xu(1:5) = xu_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
+      xu(1) = xu_in(base + 1_8)
+      xu(2) = xu_in(base + 2_8)
+      xu(3) = xu_in(base + 3_8)
+      xu(4) = xu_in(base + 4_8)
+      xu(5) = xu_in(base + 5_8)
       xw = MATMUL(Jinv, xu)
-      xw_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xw
+      xw_out(base + 1_8) = xw(1)
+      xw_out(base + 2_8) = xw(2)
+      xw_out(base + 3_8) = xw(3)
+      xw_out(base + 4_8) = xw(4)
+      xw_out(base + 5_8) = xw(5)
     END DO
   END SUBROUTINE APPLY_DU_TO_DW
 
