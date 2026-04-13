@@ -155,7 +155,7 @@ CONTAINS
     KSPConvergedReason :: reason
     PetscErrorCode :: ierr
     PetscInt :: n_petsc, max_it_petsc, restart_petsc, its, i
-    PetscReal :: rnorm, bnorm, xnorm0, axnorm0, axnormb, az_pre, az_post
+    PetscReal :: rnorm, bnorm, xnorm0, axnorm0, axnormb, az_pre1, az_pre2, az_pre3, az_post
     PetscInt, ALLOCATABLE :: idx(:)
     PetscScalar, ALLOCATABLE :: vals(:)
     REAL(kind=8), ALLOCATABLE :: zprobe(:), az(:)
@@ -168,11 +168,17 @@ CONTAINS
     ALLOCATE(zprobe(n), az(n))
     zprobe = 0.0_8
     CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
-    az_pre = SQRT(SUM(az*az))
-    PRINT *, '[PETSC-PREINIT] ||A*0||=', az_pre
+    az_pre1 = SQRT(SUM(az*az))
+    PRINT *, '[PETSC-PREINIT-1] ||A*0||=', az_pre1
+    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    az_pre2 = SQRT(SUM(az*az))
+    PRINT *, '[PETSC-PREINIT-2] ||A*0||=', az_pre2
+    CALL TANGENT_MATVEC_WRAP(n, zprobe, az)
+    az_pre3 = SQRT(SUM(az*az))
+    PRINT *, '[PETSC-PREINIT-3] ||A*0||=', az_pre3
 
     IF (.NOT. petsc_initialized_local) THEN
-      CALL PetscInitialize(PETSC_NULL_CHARACTER, ierr)
+      CALL PetscInitialize(ierr)
       IF (ierr /= 0) THEN
         PRINT *, '[PETSC] initialize failed, ierr=', ierr
         RETURN
