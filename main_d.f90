@@ -348,10 +348,9 @@ CONTAINS
 								maxiter = 10
 								m_restart = 50
 								IF (use_petsc_tangent_solver_runtime) THEN
-								  ! Keep PETSc path stable first, while preserving DAFoam-like right-PC setup.
-								  ! TODO: re-enable conservative unknown mapping after APPLY_DU_TO_DW crash is fixed.
-								  use_conservative_unknown_operator = .FALSE.
-								  pc_use_cons_right_transform = .FALSE.
+								  ! Final attempt: enforce consistent conservative-unknown mapping in PETSc path.
+								  use_conservative_unknown_operator = .TRUE.
+								  pc_use_cons_right_transform = .TRUE.
 								  pc_use_am1 = .FALSE.
 								  pc_use_am_poly = .FALSE.
 								  pc_use_two_level = .FALSE.

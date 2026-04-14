@@ -11033,14 +11033,22 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     REAL(kind=8), INTENT(IN) :: sigma_shift
     REAL(kind=8), INTENT(OUT) :: vec_out(:)
     REAL(kind=8), INTENT(INOUT) :: vec_tmp_dw(:)
+    INTEGER(kind=8) :: nwork
 
+    nwork = MIN(n, INT(SIZE(vec_work), kind=8), INT(SIZE(vec_out), kind=8))
+    vec_out = 0.0_8
+    IF (nwork <= 0_8) RETURN
     IF (use_conservative_unknown_operator) THEN
-      CALL APPLY_DU_TO_DW(cellprimitives, vec_work, vec_tmp_dw)
-      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_tmp_dw, vec_out)
+      IF (INT(SIZE(vec_tmp_dw), kind=8) < nwork) THEN
+        CALL TANGENT_MATVEC(data_4d137, cellprimitives, nwork, vec_work, vec_out)
+      ELSE
+        CALL APPLY_DU_TO_DW(cellprimitives, vec_work, vec_tmp_dw)
+        CALL TANGENT_MATVEC(data_4d137, cellprimitives, nwork, vec_tmp_dw, vec_out)
+      END IF
     ELSE
-      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_work, vec_out)
+      CALL TANGENT_MATVEC(data_4d137, cellprimitives, nwork, vec_work, vec_out)
     END IF
-    IF (sigma_shift > 0.0_8) vec_out(1:n) = vec_out(1:n) + sigma_shift * vec_work(1:n)
+    IF (sigma_shift > 0.0_8) vec_out(1:nwork) = vec_out(1:nwork) + sigma_shift * vec_work(1:nwork)
   END SUBROUTINE APPLY_TANGENT_OPERATOR_WORK
 
   SUBROUTINE APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r_in, r_out)
@@ -11140,19 +11148,25 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
     REAL(kind=8), INTENT(IN) :: xw_in(:)
     REAL(kind=8), INTENT(OUT) :: xu_out(:)
-    INTEGER(kind=8) :: c, ncells, nvec, base
+    INTEGER(kind=8) :: c, ncells, nvec, nlimit, base
     REAL(kind=8) :: wp(5), J(5,5), xw(5), xu(5)
     TYPE(FLUIDD) :: fluid
-    ncells = SIZE(cellprimitives, 1)
+    ncells = INT(SIZE(cellprimitives, 1), kind=8)
     xu_out = 0.0_8
-    nvec = SIZE(xw_in)
+    IF (SIZE(cellprimitives, 2) < 5) RETURN
+    nvec = INT(SIZE(xw_in), kind=8)
+    nlimit = MIN(nvec, INT(SIZE(xu_out), kind=8))
+    IF (nlimit < 5_8) RETURN
+    ncells = MIN(ncells, nlimit / 5_8)
+    IF (ncells <= 0_8) RETURN
     fluid%cp = 1005.0d0
     fluid%r = 287.05d0
     fluid%gammaa = 1.4d0
     DO c = 1_8, ncells
       base = (c-1_8)*5_8
-      IF (base + 5_8 > nvec) EXIT
       wp(1:5) = cellprimitives(c, 1:5)
+      wp(1) = MAX(wp(1), 1.0d-12)
+      wp(2) = MAX(wp(2), 1.0d-12)
       CALL BUILD_DUDW_5X5(wp, fluid, J)
       xw(1) = xw_in(base + 1_8)
       xw(2) = xw_in(base + 2_8)
@@ -11160,6 +11174,7 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
       xw(4) = xw_in(base + 4_8)
       xw(5) = xw_in(base + 5_8)
       xu = MATMUL(J, xw)
+      WHERE ((xu /= xu) .OR. (ABS(xu) > 1.0d250)) xu = 0.0_8
       xu_out(base + 1_8) = xu(1)
       xu_out(base + 2_8) = xu(2)
       xu_out(base + 3_8) = xu(3)
@@ -11173,19 +11188,25 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
     REAL(kind=8), INTENT(IN) :: xu_in(:)
     REAL(kind=8), INTENT(OUT) :: xw_out(:)
-    INTEGER(kind=8) :: c, ncells, nvec, base
+    INTEGER(kind=8) :: c, ncells, nvec, nlimit, base
     REAL(kind=8) :: wp(5), Jinv(5,5), xu(5), xw(5)
     TYPE(FLUIDD) :: fluid
-    ncells = SIZE(cellprimitives, 1)
+    ncells = INT(SIZE(cellprimitives, 1), kind=8)
     xw_out = 0.0_8
-    nvec = SIZE(xu_in)
+    IF (SIZE(cellprimitives, 2) < 5) RETURN
+    nvec = INT(SIZE(xu_in), kind=8)
+    nlimit = MIN(nvec, INT(SIZE(xw_out), kind=8))
+    IF (nlimit < 5_8) RETURN
+    ncells = MIN(ncells, nlimit / 5_8)
+    IF (ncells <= 0_8) RETURN
     fluid%cp = 1005.0d0
     fluid%r = 287.05d0
     fluid%gammaa = 1.4d0
     DO c = 1_8, ncells
       base = (c-1_8)*5_8
-      IF (base + 5_8 > nvec) EXIT
       wp(1:5) = cellprimitives(c, 1:5)
+      wp(1) = MAX(wp(1), 1.0d-12)
+      wp(2) = MAX(wp(2), 1.0d-12)
       CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
       xu(1) = xu_in(base + 1_8)
       xu(2) = xu_in(base + 2_8)
@@ -11193,6 +11214,7 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
       xu(4) = xu_in(base + 4_8)
       xu(5) = xu_in(base + 5_8)
       xw = MATMUL(Jinv, xu)
+      WHERE ((xw /= xw) .OR. (ABS(xw) > 1.0d250)) xw = 0.0_8
       xw_out(base + 1_8) = xw(1)
       xw_out(base + 2_8) = xw(2)
       xw_out(base + 3_8) = xw(3)
