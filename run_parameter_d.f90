@@ -7,7 +7,7 @@ program RUN_MAIN_NODIFF
   USE MAIN_MODULE_DIFF
   USE TYPESMODULE_DIFF, ONLY: mesh_path_runtime, deformation_mode_runtime, &
 & deformation_mode_airfoil, deformation_mode_cylinder, &
-& cylinder_axis_ratio_runtime
+& cylinder_axis_ratio_runtime, gmres_recycle_runtime
   IMPLICIT NONE
 ! 输入参数
   REAL(kind=8) :: data_4d137(1, 4)
@@ -15,6 +15,7 @@ program RUN_MAIN_NODIFF
   REAL(kind=8), ALLOCATABLE :: cellprimitivesout(:, :)
   CHARACTER(len=*), PARAMETER :: mesh_case = 'mesh1'
   CHARACTER(len=*), PARAMETER :: deformation_case = 'cylinder'
+  CHARACTER(len=*), PARAMETER :: gmres_recycle_case = 'recycle' ! 'recycle' / 'plain'
   INTRINSIC ALLOCATED
   INTRINSIC SIZE
 !    real(kind=8), allocatable :: fluxResidualsOut(:,:)
@@ -22,6 +23,7 @@ program RUN_MAIN_NODIFF
 ! 一键切换模板：
 ! 1) mesh_case 可选：'mesh' / 'mesh1'
 ! 2) deformation_case 可选：'airfoil' / 'cylinder'
+! 3) gmres_recycle_case 可选：'recycle' / 'plain'
 ! ============================================================
   IF (mesh_case .EQ. 'mesh') THEN
     mesh_path_runtime = 'mesh/OFairfoilMesh'
@@ -37,6 +39,14 @@ program RUN_MAIN_NODIFF
     deformation_mode_runtime = deformation_mode_cylinder
   ELSE
     PRINT *, 'Error: unsupported deformation_case = ', deformation_case
+    STOP
+  END IF
+  IF (gmres_recycle_case .EQ. 'recycle') THEN
+    gmres_recycle_runtime = .TRUE.
+  ELSE IF (gmres_recycle_case .EQ. 'plain') THEN
+    gmres_recycle_runtime = .FALSE.
+  ELSE
+    PRINT *, 'Error: unsupported gmres_recycle_case = ', gmres_recycle_case
     STOP
   END IF
 ! 圆柱模式参数（长短轴比）

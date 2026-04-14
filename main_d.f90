@@ -346,6 +346,12 @@ CONTAINS
 								tol = 1.0d-8
 								maxiter = 10
 								m_restart = 50
+								gmres_recycle_enabled = gmres_recycle_runtime
+								IF (gmres_recycle_enabled) THEN
+								  PRINT *, '[GMRES-RECYCLE] enabled'
+								ELSE
+								  PRINT *, '[GMRES-RECYCLE] disabled'
+								END IF
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8
 								CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)   ! 先建一次，保证本轮开着
