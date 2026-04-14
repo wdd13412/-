@@ -39,6 +39,10 @@ CONTAINS
     INTRINSIC ALLOCATED
     REAL*8 :: arg1
     REAL*8 :: arg1d
+    IF (deformation_mode_runtime .EQ. deformation_mode_cylinder) THEN
+      CALL CYLINDER_DEFORMATION_D(data_4d137, data_4d137d)
+      RETURN
+    END IF
 !		real*8, allocatable :: wing(:,:), inoutput(:,:)
 !        allocate(inoutput(99, 2), source=0.0_real64)
 !        allocate(wing(99, 2), source=0.0_real64)
@@ -188,6 +192,10 @@ CONTAINS
     INTRINSIC COS
     INTRINSIC ALLOCATED
     REAL*8 :: arg1
+    IF (deformation_mode_runtime .EQ. deformation_mode_cylinder) THEN
+      CALL CYLINDER_DEFORMATION(data_4d137)
+      RETURN
+    END IF
 !		real*8, allocatable :: wing(:,:), inoutput(:,:)
 !        allocate(inoutput(99, 2), source=0.0_real64)
 !        allocate(wing(99, 2), source=0.0_real64)
@@ -296,6 +304,140 @@ CONTAINS
 
   END SUBROUTINE AIRFOIL_DEFORMATION_HH
 
+  SUBROUTINE CYLINDER_DEFORMATION(data_4d137)
+    IMPLICIT NONE
+    REAL*8, INTENT(IN) :: data_4d137(:, :)
+    REAL(kind=8), ALLOCATABLE :: points(:, :)
+    CHARACTER(len=256) :: pointsfilepath
+    REAL(kind=8) :: ratio, rmin, rmax, rinf, r, theta, rb, denom
+    REAL(kind=8) :: w, delta, rnew, scale, x, y
+    INTEGER :: i, npoints
+    INTRINSIC TRIM
+    INTRINSIC SIZE
+    INTRINSIC SQRT
+    INTRINSIC ATAN2
+    INTRINSIC COS
+    INTRINSIC SIN
+    INTRINSIC MIN
+    INTRINSIC MAX
+    pointsfilepath = TRIM(mesh_path_runtime)//'/points'
+    points = READOFPOINTSFILEF(pointsfilepath)
+    npoints = SIZE(points, 1)
+    IF (npoints .LE. 0) THEN
+      PRINT *, 'Error: invalid points for cylinder deformation.'
+      STOP
+    END IF
+    ratio = cylinder_axis_ratio_runtime
+    IF (SIZE(data_4d137, 1) .GE. 1 .AND. SIZE(data_4d137, 2) .GE. 1) THEN
+      ratio = data_4d137(1, 1)
+    END IF
+    ratio = MAX(0.2_8, ratio)
+    rmin = HUGE(1.0_8)
+    rmax = 0.0_8
+    DO i=1,npoints
+      r = SQRT(points(i, 1)*points(i, 1) + points(i, 2)*points(i, 2))
+      IF (r .GT. 1.0d-10) THEN
+        rmin = MIN(rmin, r)
+        rmax = MAX(rmax, r)
+      END IF
+    END DO
+    IF (rmin .GE. HUGE(1.0_8)*0.5_8) THEN
+      point_update = points
+      RETURN
+    END IF
+    rinf = MIN(6.0_8*rmin, 0.6_8*rmax)
+    IF (rinf .LE. rmin) rinf = 2.5_8*rmin
+    point_update = points
+    DO i=1,npoints
+      x = points(i, 1)
+      y = points(i, 2)
+      r = SQRT(x*x + y*y)
+      IF (r .LE. 1.0d-12 .OR. r .GT. rinf) CYCLE
+      theta = ATAN2(y, x)
+      denom = SQRT((COS(theta)/ratio)**2 + SIN(theta)**2)
+      rb = rmin/denom
+      w = (rinf-r)/(rinf-rmin+1.0d-12)
+      w = MAX(0.0_8, MIN(1.0_8, w))
+      w = w*w
+      delta = (rb-rmin)*w*(rmin/MAX(r, rmin))
+      rnew = r + delta
+      scale = rnew/MAX(r, 1.0d-12)
+      point_update(i, 1) = x*scale
+      point_update(i, 2) = y*scale
+    END DO
+  END SUBROUTINE CYLINDER_DEFORMATION
+
+  SUBROUTINE CYLINDER_DEFORMATION_D(data_4d137, data_4d137d)
+    IMPLICIT NONE
+    REAL*8, INTENT(IN) :: data_4d137(:, :)
+    REAL*8, INTENT(IN) :: data_4d137d(:, :)
+    REAL(kind=8), ALLOCATABLE :: points(:, :)
+    CHARACTER(len=256) :: pointsfilepath
+    REAL(kind=8) :: ratio, ratio_d, rmin, rmax, rinf, r, theta, rb, denom
+    REAL(kind=8) :: w, drb_dr, ddelta_dr, dscale_dr, x, y
+    INTEGER :: i, npoints
+    INTRINSIC TRIM
+    INTRINSIC SIZE
+    INTRINSIC SQRT
+    INTRINSIC ATAN2
+    INTRINSIC COS
+    INTRINSIC SIN
+    INTRINSIC MIN
+    INTRINSIC MAX
+    pointsfilepath = TRIM(mesh_path_runtime)//'/points'
+    points = READOFPOINTSFILEF(pointsfilepath)
+    npoints = SIZE(points, 1)
+    IF (npoints .LE. 0) THEN
+      PRINT *, 'Error: invalid points for cylinder deformation D.'
+      STOP
+    END IF
+    ratio = cylinder_axis_ratio_runtime
+    IF (SIZE(data_4d137, 1) .GE. 1 .AND. SIZE(data_4d137, 2) .GE. 1) THEN
+      ratio = data_4d137(1, 1)
+    END IF
+    ratio = MAX(0.2_8, ratio)
+    ratio_d = 0.0_8
+    IF (SIZE(data_4d137d, 1) .GE. 1 .AND. SIZE(data_4d137d, 2) .GE. 1) THEN
+      ratio_d = data_4d137d(1, 1)
+    END IF
+    rmin = HUGE(1.0_8)
+    rmax = 0.0_8
+    DO i=1,npoints
+      r = SQRT(points(i, 1)*points(i, 1) + points(i, 2)*points(i, 2))
+      IF (r .GT. 1.0d-10) THEN
+        rmin = MIN(rmin, r)
+        rmax = MAX(rmax, r)
+      END IF
+    END DO
+    point_update = points
+    IF (.NOT.ALLOCATED(point_updated)) ALLOCATE(point_updated(npoints, 3))
+    point_updated = 0.0_8
+    IF (rmin .GE. HUGE(1.0_8)*0.5_8) RETURN
+    rinf = MIN(6.0_8*rmin, 0.6_8*rmax)
+    IF (rinf .LE. rmin) rinf = 2.5_8*rmin
+    DO i=1,npoints
+      x = points(i, 1)
+      y = points(i, 2)
+      r = SQRT(x*x + y*y)
+      IF (r .LE. 1.0d-12 .OR. r .GT. rinf) CYCLE
+      theta = ATAN2(y, x)
+      denom = SQRT((COS(theta)/ratio)**2 + SIN(theta)**2)
+      rb = rmin/denom
+      w = (rinf-r)/(rinf-rmin+1.0d-12)
+      w = MAX(0.0_8, MIN(1.0_8, w))
+      w = w*w
+      point_update(i, 1) = x*(r + (rb-rmin)*w*(rmin/MAX(r, rmin)))/MAX(r, &
+&                          1.0d-12)
+      point_update(i, 2) = y*(r + (rb-rmin)*w*(rmin/MAX(r, rmin)))/MAX(r, &
+&                          1.0d-12)
+      drb_dr = rmin*(COS(theta)**2)/(ratio**3*denom**3)
+      ddelta_dr = drb_dr*w*(rmin/MAX(r, rmin))*ratio_d
+      dscale_dr = ddelta_dr/MAX(r, 1.0d-12)
+      point_updated(i, 1) = x*dscale_dr
+      point_updated(i, 2) = y*dscale_dr
+    END DO
+  END SUBROUTINE CYLINDER_DEFORMATION_D
+
 !  Differentiation of meshdeformation in forward (tangent) mode (with options i4 dr8 r4):
 !   variations   of useful results: *point_update
 !   with respect to varying inputs: [alloc*wing_update in airfoil_deformation_hh]
@@ -335,7 +477,7 @@ CONTAINS
     REAL(kind=8) :: arg2
 !		real*8, allocatable :: wing(:,:), inoutput(:,:)
     PRINT*, 'aAa'
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     pointsfilepath = TRIM(meshpath)//'/points'
 !		allocate(points(37254,3), source=0.0_8)  ! 空数组初始化
     points_meshdefor = READOFPOINTSFILEF(pointsfilepath)
@@ -550,7 +692,7 @@ CONTAINS
     REAL(kind=8) :: arg2
 !		real*8, allocatable :: wing(:,:), inoutput(:,:)
     PRINT*, 'aAa'
-    meshpath = 'mesh/OFairfoilMesh'
+    meshpath = TRIM(mesh_path_runtime)
     pointsfilepath = TRIM(meshpath)//'/points'
 !		allocate(points(37254,3), source=0.0_8)  ! 空数组初始化
     points_meshdefor = READOFPOINTSFILEF(pointsfilepath)
@@ -903,6 +1045,7 @@ CONTAINS
     REAL(kind=8) :: coords(3)
     INTRINSIC TRIM
     INTRINSIC LEN_TRIM
+    INTRINSIC ALLOCATED
     file_unit = GET_FREE_UNITT()
     OPEN(unit=file_unit, file=filepath, status='old', action='read', &
 &  iostat=iostat) 
@@ -916,7 +1059,8 @@ CONTAINS
         READ(file_unit, '(a)', iostat=iostat) 
         IF (iostat .NE. 0) THEN
           REWIND(file_unit) 
-!        allocate(lines_defor(nLines))
+          IF (ALLOCATED(lines_defor)) DEALLOCATE(lines_defor)
+          ALLOCATE(lines_defor(nlines))
           DO i=1,nlines
             READ(file_unit, '(a)') lines_defor(i)
           END DO
@@ -924,7 +1068,6 @@ CONTAINS
           CALL OFFILE_FINDNITEMSS(lines_defor, startline, pcount)
           IF (pcount .LE. 0) THEN
             PRINT*, 'Error: Invalid point count in ', TRIM(filepath)
-            DEALLOCATE(lines_defor)
             ALLOCATE(points(0, 3))
             RETURN
           ELSE
