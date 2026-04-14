@@ -295,7 +295,7 @@ CONTAINS
     INTEGER(kind=8) :: row_start, row_end, token, sel, nblkrow, nconflict
     INTEGER(kind=8), ALLOCATABLE :: neigh_cnt(:), neigh_ptr(:), neigh_fill(:), neigh_ind(:), marks(:), colors(:)
     INTEGER(kind=8), ALLOCATABLE :: color_cnt(:), color_ptr(:), color_fill(:), color_cells(:), used_color(:)
-    REAL(kind=8), ALLOCATABLE :: probe_x(:), probe_y(:), probe_dw(:)
+    REAL(kind=8), ALLOCATABLE :: probe_x(:), probe_y(:), probe_dw(:), probe_y0(:)
     PetscInt :: n_petsc
     PetscInt, ALLOCATABLE :: d_nnz(:), row_idx(:), col_idx(:)
     PetscScalar :: col_vals(5)
@@ -414,11 +414,19 @@ CONTAINS
     END DO
     DEALLOCATE(color_fill, color_cnt, used_color, neigh_ind, neigh_ptr)
 
-    ALLOCATE(probe_x(nloc), probe_y(nloc), probe_dw(nloc))
+    ALLOCATE(probe_x(nloc), probe_y(nloc), probe_dw(nloc), probe_y0(nloc))
     ALLOCATE(row_idx(5), col_idx(1))
     probe_x = 0.0_8
     probe_y = 0.0_8
     probe_dw = 0.0_8
+    probe_y0 = 0.0_8
+
+    ! DAFoam-style probing: subtract baseline A*0 to remove additive contamination.
+    CALL TANGENT_SANDBOX_PUSH()
+    CALL TANGENT_SANDBOX_APPLY_BASELINE()
+    CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, nloc, probe_x, 0.0_8, probe_y0, probe_dw)
+    CALL APPLY_RESIDUAL_SCALING(probe_y0)
+    CALL TANGENT_SANDBOX_POP()
 
     DO k = 1_8, 5_8
       DO color = 1_8, max_color
@@ -433,6 +441,7 @@ CONTAINS
         CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, nloc, probe_x, 0.0_8, probe_y, probe_dw)
         CALL APPLY_RESIDUAL_SCALING(probe_y)
         CALL TANGENT_SANDBOX_POP()
+        probe_y = probe_y - probe_y0
 
         DO i = 1_8, ncells
           sel = 0_8
@@ -450,10 +459,16 @@ CONTAINS
           DO ir = 1_8, 5_8
             row_idx(ir) = INT((i-1_8)*5_8 + (ir-1_8), KIND=KIND(row_idx(ir)))
             col_vals(ir) = probe_y((i-1_8)*5_8 + ir)
+            ! DAFoam-like jacLowerBounds for PC matrix.
+            IF (ABS(col_vals(ir)) < 1.0d-30) col_vals(ir) = 0.0_8
           END DO
+          IF (i == sel) THEN
+            ! Add tiny diagonal floor for ILU robustness.
+            col_vals(k) = col_vals(k) + 1.0d-12
+          END IF
           CALL MatSetValues(Pmat, 5, row_idx, 1, col_idx, col_vals, INSERT_VALUES, ierr)
           IF (ierr /= 0) THEN
-            DEALLOCATE(colors, color_ptr, color_cells, probe_x, probe_y, probe_dw, row_idx, col_idx)
+            DEALLOCATE(colors, color_ptr, color_cells, probe_x, probe_y, probe_dw, probe_y0, row_idx, col_idx)
             RETURN
           END IF
         END DO
@@ -468,7 +483,7 @@ CONTAINS
     PRINT *, '[PETSC-PMAT-COLOR] colors=', max_color, ' conflicts=', nconflict
     pmat_ready = .TRUE.
 
-    DEALLOCATE(colors, color_ptr, color_cells, probe_x, probe_y, probe_dw, row_idx, col_idx)
+    DEALLOCATE(colors, color_ptr, color_cells, probe_x, probe_y, probe_dw, probe_y0, row_idx, col_idx)
   END SUBROUTINE BUILD_PMAT_FROM_OPERATOR_COLORING
 
   SUBROUTINE TANGENT_PETSC_MATMULT_IMPL(A, X, Y, ierr)
