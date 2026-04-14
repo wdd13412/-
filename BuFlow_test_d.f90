@@ -169,7 +169,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_var_scale_p = 8.0d0
   REAL(kind=8), SAVE :: pc_var_scale_t = 2.0d0
   REAL(kind=8), SAVE :: pc_var_scale_u = 1.5d0
-  LOGICAL, SAVE :: pc_use_cons_right_transform = .TRUE.
+  LOGICAL, SAVE :: pc_use_cons_right_transform = .FALSE.
   REAL(kind=8), SAVE :: pc_cons_floor = 1.0d-10
   LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
   LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
@@ -240,12 +240,8 @@ MODULE BUFLOWMODULE_DIFF
 	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_off(:)       ! (nnzb) 仅邻接项，含对角位可复用
 	LOGICAL, SAVE :: pc_sp_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: point_updated_rhs(:, :)
-  LOGICAL, SAVE :: use_conservative_unknown_operator = .TRUE.
+  LOGICAL, SAVE :: use_conservative_unknown_operator = .FALSE.
   LOGICAL, SAVE :: use_primitive_residual_operator = .FALSE.
-  LOGICAL, SAVE :: tangent_use_residual_scaling = .TRUE.
-  REAL(kind=8), SAVE :: tangent_res_scale_mass = 1.0d0
-  REAL(kind=8), SAVE :: tangent_res_scale_momentum = 3.0d2
-  REAL(kind=8), SAVE :: tangent_res_scale_energy = 3.0d5
   REAL(kind=8), ALLOCATABLE, SAVE :: operator_transform_tmp(:)
   ! ===== recycle-subspace storage (literature route: augmented restarted GMRES) =====
   LOGICAL, SAVE :: gmres_recycle_enabled = .TRUE.
@@ -3507,8 +3503,8 @@ CONTAINS
     DO bdry=1,nboundaries
 ! 统计当前边界的非零元素个数
       i = 0
-      DO WHILE (i .LT. SIZE(boundaryfaces_mesh, 2))
-        IF (boundaryfaces_mesh(bdry, i+1) .EQ. 0) EXIT
+      DO WHILE (i .LT. SIZE(boundaryfaces_mesh, 2) .AND. &
+&               boundaryfaces_mesh(bdry, i+1) .NE. 0)
         i = i + 1
       END DO
       nbdryfaces = nbdryfaces + i
@@ -7418,19 +7414,16 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
-    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len_i8 = len_vec
+      vec_len = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len_i8 = SIZE(a, kind=8)
+      vec_len = SIZE(a)
     END IF
-    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8), SIZE(ad, kind=8), SIZE(bd, kind=8))
-    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     resultd = 0.0_8
@@ -7453,19 +7446,16 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
-    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len_i8 = len_vec
+      vec_len = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len_i8 = SIZE(a, kind=8)
+      vec_len = SIZE(a)
     END IF
-    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8), SIZE(ad, kind=8))
-    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     resultd = 0.0_8
@@ -7487,19 +7477,16 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
-    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len_i8 = len_vec
+      vec_len = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len_i8 = SIZE(a, kind=8)
+      vec_len = SIZE(a)
     END IF
-    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8))
-    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     DO i=1,vec_len
@@ -7519,19 +7506,16 @@ CONTAINS
     INTEGER*8, INTENT(IN), OPTIONAL :: len_vec
 ! 局部：实际使用的向量长度
     INTEGER :: i, vec_len
-    INTEGER(kind=8) :: vec_len_i8
     INTRINSIC PRESENT
     INTRINSIC SIZE
 ! 1. 确定向量长度：优先用显式传递的len_vec，否则用size(A)（兼容现有调用）
     IF (PRESENT(len_vec)) THEN
 ! Tapenade微分时，显式传递长度（如3）
-      vec_len_i8 = len_vec
+      vec_len = len_vec
     ELSE
 ! 现有调用：默认用A的长度（不影响原有逻辑）
-      vec_len_i8 = SIZE(a, kind=8)
+      vec_len = SIZE(a)
     END IF
-    vec_len_i8 = MIN(vec_len_i8, SIZE(a, kind=8), SIZE(b, kind=8))
-    vec_len = INT(MAX(0_8, vec_len_i8))
 ! 2. 计算点积（直接用显式长度vec_len循环，避免Tapenade无法识别size(B)）
     result = 0.0_8
     DO i=1,vec_len
@@ -8048,8 +8032,7 @@ CONTAINS
     INTEGER(kind=8), INTENT(IN) :: n
     REAL(kind=8), INTENT(IN) :: v(n)
     REAL(kind=8), INTENT(OUT) :: av(n)
-    INTEGER(kind=8) :: ncells, c, ii_bad
-    REAL(kind=8) :: max_abs_av
+    INTEGER(kind=8) :: ncells, c
     REAL(kind=8) :: data_4d137d(1, 4), vnrm
     REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
     REAL(kind=8), PARAMETER :: v_zero = 1.0d-280
@@ -8064,25 +8047,11 @@ CONTAINS
       cellprimitivesd(c, 1:5) = v((c - 1)*5 + 1:(c - 1)*5 + 5)
     END DO
     data_4d137d = 0.0_8
-    ! Defensive reset: avoid any stale derivative entry leaking into Av.
-    IF (ALLOCATED(fluxresiduals_slnd)) fluxresiduals_slnd = 0.0_8
     CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
     
     DO c = 1, ncells
       av((c - 1)*5 + 1:(c - 1)*5 + 5) = fluxresiduals_slnd(c, 1:5)
     END DO
-    ii_bad = 0_8
-    max_abs_av = 0.0_8
-    DO c = 1_8, n
-      max_abs_av = MAX(max_abs_av, ABS(av(c)))
-      IF (av(c) /= av(c) .OR. ABS(av(c)) > 1.0d120) THEN
-        IF (ii_bad == 0_8) ii_bad = c
-      END IF
-    END DO
-    IF (ii_bad > 0_8) THEN
-      PRINT *, '[TANGENT_MATVEC] non-finite output detected, idx=', ii_bad, ' max|av|=', max_abs_av
-      ERROR STOP 'TANGENT_MATVEC non-finite output'
-    END IF
     DEALLOCATE(cellprimitivesd)
   END SUBROUTINE TANGENT_MATVEC
 
@@ -8177,7 +8146,6 @@ CONTAINS
 
 	  REAL(kind=8), ALLOCATABLE :: r(:), v(:, :), w(:), h(:, :), y(:), z(:), tmp(:)
 	  REAL(kind=8), ALLOCATABLE :: r_lin(:), r_work(:), x_work(:), q_tmp(:), q_inv_tmp(:)
-	  REAL(kind=8), ALLOCATABLE :: b_work(:), pc_vec_in(:), pc_vec_out(:)
 	  REAL(kind=8), ALLOCATABLE :: rec_mat(:,:), rec_alpha(:), rec_ap(:,:), p_new(:), ap_new(:)
 	  REAL(kind=8) :: bnrm, rnrm_true, tol_b, beta_kry, res_ls, &
   xnrm_old, xnrm_new, znrm, rcheck, v1norm
@@ -8210,9 +8178,6 @@ CONTAINS
 	  ALLOCATE(r(n), v(n, m_restart+1), w(n), h(m_restart+1, m_restart), &
 	&          y(m_restart), z(n), tmp(n))
 	  ALLOCATE(r_lin(n), r_work(n), x_work(n), q_tmp(n), q_inv_tmp(n))
-	  ALLOCATE(b_work(n), pc_vec_in(n), pc_vec_out(n))
-	  b_work = b
-	  IF (tangent_use_residual_scaling) CALL APPLY_RESIDUAL_SCALING(b_work)
 	  IF (use_conservative_unknown_operator) THEN
 		CALL APPLY_DW_TO_DU(cellprimitives, x, x_work)
 	  ELSE
@@ -8238,7 +8203,7 @@ CONTAINS
 	  END IF
 
 	  ! ---------- 初始真殘差 r = b - A*x ----------
-	  bnrm = SQRT(SUM(b_work*b_work))
+	  bnrm = SQRT(SUM(b*b))
 	  IF (bnrm < eps_small) bnrm = 1.0_8
 	  tol_b = tol * bnrm
 	    ! inexact forcing（参考论文思路：从 0.5 逐步降到 0.01）
@@ -8254,7 +8219,7 @@ CONTAINS
 	  PRINT *, '[GMRES-DBG] init b-norm=', bnrm
 	  PRINT *, '[GMRES-DBG] init x(1:5)=', x_work(1:5)
 	  PRINT *, '[GMRES-DBG] init w(1:5)=', w(1:5)
-	  r = b_work - w
+	  r = b - w
 	  IF (use_primitive_residual_operator) THEN
 		CALL APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r, r_work)
 		r = r_work
@@ -8303,13 +8268,12 @@ CONTAINS
 
 	  IF (rnrm_true <= tol_b) THEN
 		info = 0
-        IF (tangent_use_residual_scaling) CALL APPLY_INV_RESIDUAL_SCALING(x_work)
 		IF (use_conservative_unknown_operator) THEN
 		  CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
 		ELSE
 		  x = x_work
 		END IF
-		DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp, b_work, pc_vec_in, pc_vec_out)
+		DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 		RETURN
 	  END IF
 	  rnrm_prev_outer = rnrm_true
@@ -8391,13 +8355,12 @@ CONTAINS
 		  DEALLOCATE(A_rec_ls, b_rec_ls, work_rec_ls, rec_mat, rec_ap, rec_alpha)
 		  IF (rnrm_true <= tol_b) THEN
 			info = 0
-            IF (tangent_use_residual_scaling) CALL APPLY_INV_RESIDUAL_SCALING(x_work)
 			IF (use_conservative_unknown_operator) THEN
 			  CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
 			ELSE
 			  x = x_work
 			END IF
-			DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp, b_work, pc_vec_in, pc_vec_out)
+			DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 			RETURN
 		  END IF
 		END IF
@@ -8410,13 +8373,12 @@ CONTAINS
          ' rnorm(start)/||b||=', rnrm_true / bnrm
 		IF (beta_kry < eps_small) THEN
 		  info = 0
-          IF (tangent_use_residual_scaling) CALL APPLY_INV_RESIDUAL_SCALING(x_work)
 		  IF (use_conservative_unknown_operator) THEN
 		    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
 		  ELSE
 		    x = x_work
 		  END IF
-		  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp, b_work, pc_vec_in, pc_vec_out)
+		  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 		  RETURN
 		END IF
 		v(1:n, 1) = r / beta_kry
@@ -8431,17 +8393,7 @@ CONTAINS
 		DO j = 1, m_restart
 
 		  IF (pc_ready) THEN
-            IF (use_conservative_unknown_operator) THEN
-              CALL APPLY_DU_TO_DW(cellprimitives, v(1:n, j), pc_vec_in)
-            ELSE
-              pc_vec_in(1:n) = v(1:n, j)
-            END IF
-		    CALL APPLY_PC_INV(pc_vec_in, pc_vec_out)
-            IF (use_conservative_unknown_operator) THEN
-              CALL APPLY_DW_TO_DU(cellprimitives, pc_vec_out, z)
-            ELSE
-              z(1:n) = pc_vec_out(1:n)
-            END IF
+		    CALL APPLY_PC_INV(v(1:n, j), z)
 		  ELSE
 		    z(1:n) = v(1:n, j)
 		  END IF
@@ -8578,17 +8530,7 @@ CONTAINS
 		drel   = tmpnrm / MAX(1.0d-300, xnrm)
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||tmp||=', tmpnrm, ' ||x||=', xnrm, ' ||tmp||/||x||=', drel
 		IF (pc_ready) THEN
-          IF (use_conservative_unknown_operator) THEN
-            CALL APPLY_DU_TO_DW(cellprimitives, tmp(1:n), pc_vec_in)
-          ELSE
-            pc_vec_in(1:n) = tmp(1:n)
-          END IF
-		  CALL APPLY_PC_INV(pc_vec_in, pc_vec_out)
-          IF (use_conservative_unknown_operator) THEN
-            CALL APPLY_DW_TO_DU(cellprimitives, pc_vec_out, z)
-          ELSE
-            z(1:n) = pc_vec_out(1:n)
-          END IF
+		  CALL APPLY_PC_INV(tmp, z)
 		ELSE
 		  z(1:n) = tmp(1:n)
 		END IF
@@ -8638,7 +8580,7 @@ CONTAINS
 		!!!!!正则化，待删/缺乏一个反回归
 !		w(1:n) = w(1:n) + eps_reg * x(1:n)
 		!!!!!
-		r = b_work - w
+		r = b - w
 		IF (use_primitive_residual_operator) THEN
 		  CALL APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r, r_work)
 		  r = r_work
@@ -8663,13 +8605,12 @@ CONTAINS
 
 		IF (rnrm_true <= tol_b) THEN
 		  info = 0
-          IF (tangent_use_residual_scaling) CALL APPLY_INV_RESIDUAL_SCALING(x_work)
 		  IF (use_conservative_unknown_operator) THEN
 		    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
 		  ELSE
 		    x = x_work
 		  END IF
-		  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp, b_work, pc_vec_in, pc_vec_out)
+		  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 		  RETURN
 		END IF
 	  END DO
@@ -8679,13 +8620,12 @@ CONTAINS
 	  ELSE
 		info = 1
 	  END IF
-      IF (tangent_use_residual_scaling) CALL APPLY_INV_RESIDUAL_SCALING(x_work)
 	  IF (use_conservative_unknown_operator) THEN
 	    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
 	  ELSE
 	    x = x_work
 	  END IF
-	  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp, b_work, pc_vec_in, pc_vec_out)
+	  DEALLOCATE(r, v, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
 
 	END SUBROUTINE SOLVE_TANGENT_JFGMRES
   SUBROUTINE OUTPUT_WALL_CP_CSV(meshpath, point_update, cellprimitives, &
@@ -11033,22 +10973,14 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     REAL(kind=8), INTENT(IN) :: sigma_shift
     REAL(kind=8), INTENT(OUT) :: vec_out(:)
     REAL(kind=8), INTENT(INOUT) :: vec_tmp_dw(:)
-    INTEGER(kind=8) :: nwork
 
-    nwork = MIN(n, INT(SIZE(vec_work), kind=8), INT(SIZE(vec_out), kind=8))
-    vec_out = 0.0_8
-    IF (nwork <= 0_8) RETURN
     IF (use_conservative_unknown_operator) THEN
-      IF (INT(SIZE(vec_tmp_dw), kind=8) < nwork) THEN
-        CALL TANGENT_MATVEC(data_4d137, cellprimitives, nwork, vec_work, vec_out)
-      ELSE
-        CALL APPLY_DU_TO_DW(cellprimitives, vec_work, vec_tmp_dw)
-        CALL TANGENT_MATVEC(data_4d137, cellprimitives, nwork, vec_tmp_dw, vec_out)
-      END IF
+      CALL APPLY_DU_TO_DW(cellprimitives, vec_work, vec_tmp_dw)
+      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_tmp_dw, vec_out)
     ELSE
-      CALL TANGENT_MATVEC(data_4d137, cellprimitives, nwork, vec_work, vec_out)
+      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_work, vec_out)
     END IF
-    IF (sigma_shift > 0.0_8) vec_out(1:nwork) = vec_out(1:nwork) + sigma_shift * vec_work(1:nwork)
+    IF (sigma_shift > 0.0_8) vec_out(1:n) = vec_out(1:n) + sigma_shift * vec_work(1:n)
   END SUBROUTINE APPLY_TANGENT_OPERATOR_WORK
 
   SUBROUTINE APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r_in, r_out)
@@ -11103,83 +11035,25 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     END DO
   END SUBROUTINE APPLY_INV_PRIMITIVE_LEFT_TRANSFORM
 
-  SUBROUTINE APPLY_RESIDUAL_SCALING(vec)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(INOUT) :: vec(:)
-    INTEGER(kind=8) :: ncells, c, base
-    REAL(kind=8) :: s_mass, s_mom, s_ener
-    IF (.NOT. tangent_use_residual_scaling) RETURN
-    ncells = SIZE(vec) / 5_8
-    s_mass = MAX(tangent_res_scale_mass, 1.0d-30)
-    s_mom = MAX(tangent_res_scale_momentum, 1.0d-30)
-    s_ener = MAX(tangent_res_scale_energy, 1.0d-30)
-    DO c = 1_8, ncells
-      base = (c - 1_8) * 5_8
-      vec(base + 1_8) = vec(base + 1_8) / s_mass
-      vec(base + 2_8) = vec(base + 2_8) / s_mom
-      vec(base + 3_8) = vec(base + 3_8) / s_mom
-      vec(base + 4_8) = vec(base + 4_8) / s_mom
-      vec(base + 5_8) = vec(base + 5_8) / s_ener
-    END DO
-  END SUBROUTINE APPLY_RESIDUAL_SCALING
-
-  SUBROUTINE APPLY_INV_RESIDUAL_SCALING(vec)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(INOUT) :: vec(:)
-    INTEGER(kind=8) :: ncells, c, base
-    REAL(kind=8) :: s_mass, s_mom, s_ener
-    IF (.NOT. tangent_use_residual_scaling) RETURN
-    ncells = SIZE(vec) / 5_8
-    s_mass = MAX(tangent_res_scale_mass, 1.0d-30)
-    s_mom = MAX(tangent_res_scale_momentum, 1.0d-30)
-    s_ener = MAX(tangent_res_scale_energy, 1.0d-30)
-    DO c = 1_8, ncells
-      base = (c - 1_8) * 5_8
-      vec(base + 1_8) = vec(base + 1_8) * s_mass
-      vec(base + 2_8) = vec(base + 2_8) * s_mom
-      vec(base + 3_8) = vec(base + 3_8) * s_mom
-      vec(base + 4_8) = vec(base + 4_8) * s_mom
-      vec(base + 5_8) = vec(base + 5_8) * s_ener
-    END DO
-  END SUBROUTINE APPLY_INV_RESIDUAL_SCALING
-
   SUBROUTINE APPLY_DW_TO_DU(cellprimitives, xw_in, xu_out)
     IMPLICIT NONE
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
     REAL(kind=8), INTENT(IN) :: xw_in(:)
     REAL(kind=8), INTENT(OUT) :: xu_out(:)
-    INTEGER(kind=8) :: c, ncells, nvec, nlimit, base
+    INTEGER(kind=8) :: c, ncells
     REAL(kind=8) :: wp(5), J(5,5), xw(5), xu(5)
     TYPE(FLUIDD) :: fluid
-    ncells = INT(SIZE(cellprimitives, 1), kind=8)
+    ncells = SIZE(cellprimitives, 1)
     xu_out = 0.0_8
-    IF (SIZE(cellprimitives, 2) < 5) RETURN
-    nvec = INT(SIZE(xw_in), kind=8)
-    nlimit = MIN(nvec, INT(SIZE(xu_out), kind=8))
-    IF (nlimit < 5_8) RETURN
-    ncells = MIN(ncells, nlimit / 5_8)
-    IF (ncells <= 0_8) RETURN
     fluid%cp = 1005.0d0
     fluid%r = 287.05d0
     fluid%gammaa = 1.4d0
     DO c = 1_8, ncells
-      base = (c-1_8)*5_8
       wp(1:5) = cellprimitives(c, 1:5)
-      wp(1) = MAX(wp(1), 1.0d-12)
-      wp(2) = MAX(wp(2), 1.0d-12)
       CALL BUILD_DUDW_5X5(wp, fluid, J)
-      xw(1) = xw_in(base + 1_8)
-      xw(2) = xw_in(base + 2_8)
-      xw(3) = xw_in(base + 3_8)
-      xw(4) = xw_in(base + 4_8)
-      xw(5) = xw_in(base + 5_8)
+      xw(1:5) = xw_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
       xu = MATMUL(J, xw)
-      WHERE ((xu /= xu) .OR. (ABS(xu) > 1.0d250)) xu = 0.0_8
-      xu_out(base + 1_8) = xu(1)
-      xu_out(base + 2_8) = xu(2)
-      xu_out(base + 3_8) = xu(3)
-      xu_out(base + 4_8) = xu(4)
-      xu_out(base + 5_8) = xu(5)
+      xu_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xu
     END DO
   END SUBROUTINE APPLY_DW_TO_DU
 
@@ -11188,38 +11062,20 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
     REAL(kind=8), INTENT(IN) :: xu_in(:)
     REAL(kind=8), INTENT(OUT) :: xw_out(:)
-    INTEGER(kind=8) :: c, ncells, nvec, nlimit, base
+    INTEGER(kind=8) :: c, ncells
     REAL(kind=8) :: wp(5), Jinv(5,5), xu(5), xw(5)
     TYPE(FLUIDD) :: fluid
-    ncells = INT(SIZE(cellprimitives, 1), kind=8)
+    ncells = SIZE(cellprimitives, 1)
     xw_out = 0.0_8
-    IF (SIZE(cellprimitives, 2) < 5) RETURN
-    nvec = INT(SIZE(xu_in), kind=8)
-    nlimit = MIN(nvec, INT(SIZE(xw_out), kind=8))
-    IF (nlimit < 5_8) RETURN
-    ncells = MIN(ncells, nlimit / 5_8)
-    IF (ncells <= 0_8) RETURN
     fluid%cp = 1005.0d0
     fluid%r = 287.05d0
     fluid%gammaa = 1.4d0
     DO c = 1_8, ncells
-      base = (c-1_8)*5_8
       wp(1:5) = cellprimitives(c, 1:5)
-      wp(1) = MAX(wp(1), 1.0d-12)
-      wp(2) = MAX(wp(2), 1.0d-12)
       CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
-      xu(1) = xu_in(base + 1_8)
-      xu(2) = xu_in(base + 2_8)
-      xu(3) = xu_in(base + 3_8)
-      xu(4) = xu_in(base + 4_8)
-      xu(5) = xu_in(base + 5_8)
+      xu(1:5) = xu_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
       xw = MATMUL(Jinv, xu)
-      WHERE ((xw /= xw) .OR. (ABS(xw) > 1.0d250)) xw = 0.0_8
-      xw_out(base + 1_8) = xw(1)
-      xw_out(base + 2_8) = xw(2)
-      xw_out(base + 3_8) = xw(3)
-      xw_out(base + 4_8) = xw(4)
-      xw_out(base + 5_8) = xw(5)
+      xw_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xw
     END DO
   END SUBROUTINE APPLY_DU_TO_DW
 
