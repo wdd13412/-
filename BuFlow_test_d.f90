@@ -151,11 +151,11 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_coarse_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac(:,:), pc_Ac_inv(:,:)
     ! ===== two-level coarse space: 5 x Nagg =====
-  INTEGER(kind=8), SAVE :: pc_nagg = 64_8
+  INTEGER(kind=8), SAVE :: pc_nagg = 8_8
   INTEGER(kind=8), SAVE :: pc_nc = 0_8
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_agg_id(:)      ! size ncells, 1..pc_nagg
   ! ===== ILU ordering: RCM (apply in factor/solve traversal) =====
-  LOGICAL, SAVE :: pc_use_rcm_order = .FALSE.
+  LOGICAL, SAVE :: pc_use_rcm_order = .TRUE.
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:), pc_iperm(:)
   LOGICAL, SAVE :: pc_use_targeted_boost = .FALSE.
   LOGICAL, SAVE :: pc_use_pschur = .FALSE.
@@ -539,7 +539,7 @@ CONTAINS
 ! 已知初始时间步
     initdt = 0.0000001
 !36.5       ! 已知总仿真时间!!!!!
-    endtime = 2500
+    endtime = 600
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -8733,18 +8733,22 @@ CONTAINS
 	  REAL(kind=8), PARAMETER :: pc_s_P = 1.0d5, pc_s_T = 3.0d2, pc_s_U = 2.73d2
 
 	  INTEGER(kind=8), ALLOCATABLE :: deg(:), fill(:), nlist(:,:), row_cnt(:)
-	  INTEGER(kind=8) :: j, nnzb, p
+	  INTEGER(kind=8) :: j, nnzb, p, k, nb, slot, extra_cap
 	  LOGICAL :: ok
 	  REAL(kind=8) :: conv_w, diff_w
 	  REAL(kind=8) :: nx, ny, nz, amag, un, a_face, lam_face
 	  REAL(kind=8) :: ux_face, uy_face, uz_face, t_face
 	  REAL(kind=8) :: wtot, mass_coeff, volc
-	  REAL(kind=8) :: dist_on, p_lap
+	  REAL(kind=8) :: dist_on, p_lap, vol_owner, vol_neighbour
 	  REAL(kind=8) :: w_face(5), J5(5,5), Jface(5,5), Jconv(5,5), Jcons(5,5), Jconv_eff(5,5), Jmass_eff(5,5), scale_cons
+	  REAL(kind=8) :: Jrow_owner(5,5), Jrow_neighbour(5,5)
 	    ! ==== robust-PC locals: drop compensation + shifted ILU ====
 	  INTEGER(kind=8) :: ii, pp, jj, i
 	  REAL(kind=8) :: ndiag, nblk, tinyv, drop_th, dropped_sum, compv
 	  REAL(kind=8) :: offsum, shiftv
+      REAL(kind=8) :: dd_req, dd_gap
+      REAL(kind=8) :: seed_budget, seed_acc, seed_val
+      REAL(kind=8) :: seed_norm, seed_blk(5,5)
 	  REAL(kind=8) :: diag_sum, diag_nrm
 	  INTEGER(kind=8) :: diag_cnt
 
@@ -8800,7 +8804,9 @@ CONTAINS
 		deg(neighbourcell) = deg(neighbourcell) + 1_8
 	  END DO
 
-	  ALLOCATE(nlist(ncells, MAXVAL(deg)))
+      ! Limited 2-hop enrichment (controlled Schur-fill surrogate)
+      extra_cap = 2_8
+	  ALLOCATE(nlist(ncells, MAXVAL(deg)+extra_cap))
 	  nlist = 0_8
 	  ALLOCATE(fill(ncells))
 	  fill = 0_8
@@ -8818,6 +8824,22 @@ CONTAINS
 		fill(neighbourcell) = fill(neighbourcell) + 1_8
 		nlist(neighbourcell, fill(neighbourcell)) = ownercell
 	  END DO
+      DO c = 1_8, ncells
+        slot = fill(c)
+        DO j = 2_8, fill(c)
+          nb = nlist(c, j)
+          IF (nb < 1_8 .OR. nb > ncells .OR. nb == c) CYCLE
+          DO k = 2_8, fill(nb)
+            IF (slot >= SIZE(nlist,2)) EXIT
+            IF (nlist(nb,k) < 1_8 .OR. nlist(nb,k) > ncells) CYCLE
+            IF (nlist(nb,k) == c) CYCLE
+            slot = slot + 1_8
+            nlist(c,slot) = nlist(nb,k)
+          END DO
+          IF (slot >= fill(c) + extra_cap) EXIT
+        END DO
+        fill(c) = MIN(slot, SIZE(nlist,2,kind=8))
+      END DO
 
 	  ALLOCATE(row_cnt(ncells))
 	  DO c = 1_8, ncells
@@ -8925,14 +8947,21 @@ CONTAINS
 
         IF (pc_use_var_scaling) Jconv = SPREAD(pc_row_inv,2,5) * Jconv * SPREAD(pc_col_scale,1,5)
 
+        ! 体积归一化的面贡献（物理上对应 dR/dW 的行尺度 ~ 1/Vol）
+        ! 这样每个单元行都保持“对角=邻接和”的守恒结构，但修正非均匀网格上的病态尺度差
+        vol_owner = MAX(cvols_mesh(ownercell), 1.0d-30)
+        vol_neighbour = MAX(cvols_mesh(neighbourcell), 1.0d-30)
+        Jrow_owner = Jconv / vol_owner
+        Jrow_neighbour = Jconv / vol_neighbour
+
 		p = pc_diag_pos(ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_owner
 		p = pc_diag_pos(neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_neighbour
 		p = FIND_BLOCK_POS(ownercell, neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_owner
 		p = FIND_BLOCK_POS(neighbourcell, ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_neighbour
 	  END DO
 	  DO c = 1_8, ncells
 		p = pc_diag_pos(c)
@@ -9026,6 +9055,59 @@ CONTAINS
 		  pc_blk(p,5,5) = pc_blk(p,5,5) + pc_diag_eps
 		END IF
 	  END DO	 
+      ! Tiny seeding on empty off-diagonal blocks (only enriched positions), with strict row budget
+      DO ii = 1_8, ncells
+        p = pc_diag_pos(ii)
+        IF (p <= 0_8) CYCLE
+        CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
+        seed_blk = pc_blk(p,:,:)
+        CALL BLOCK_INF_NORM5(seed_blk, seed_norm)
+        IF (seed_norm > 1.0d-30) THEN
+          seed_blk = seed_blk / seed_norm
+        ELSE
+          seed_blk = 0.0_8
+          DO i = 1_8, 5_8
+            seed_blk(i,i) = 1.0_8
+          END DO
+        END IF
+        seed_budget = MAX(1.0d-18, 1.0d-4 * ndiag)
+        seed_acc = 0.0_8
+        DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
+          jj = pc_col_ind(pp)
+          IF (jj == ii) CYCLE
+          CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
+          IF (nblk <= 1.0d-30) THEN
+            seed_val = MIN(1.0d-10*MAX(1.0d0, ndiag), seed_budget-seed_acc)
+            IF (seed_val <= 0.0_8) EXIT
+            pc_blk(pp,:,:) = pc_blk(pp,:,:) - seed_val * seed_blk
+            pc_blk(p ,:,:) = pc_blk(p ,:,:) + seed_val * seed_blk
+            seed_acc = seed_acc + seed_val
+          END IF
+        END DO
+      END DO
+
+      ! 3.5) 固定的块对角占优修正（不依赖开关）
+      !      目的：提升 ILU 对病态/弱对角块的鲁棒性（类似 Gershgorin 思路）
+      DO ii = 1_8, ncells
+        p = pc_diag_pos(ii)
+        IF (p <= 0_8) CYCLE
+        CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
+        offsum = 0.0_8
+        DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
+          jj = pc_col_ind(pp)
+          IF (jj == ii) CYCLE
+          CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
+          offsum = offsum + nblk
+        END DO
+        dd_req = 0.15d0 * offsum
+        dd_gap = dd_req - ndiag
+        IF (dd_gap > 0.0_8) THEN
+          DO i = 1_8, 5_8
+            pc_blk(p,i,i) = pc_blk(p,i,i) + dd_gap
+          END DO
+        END IF
+      END DO
+
 	  IF (pc_use_ilut_lite) THEN
 		  CALL BUILD_ILUT_PATTERN_LITE(ncells)
 		  ! 重建对角位置（模式变了）
@@ -11622,4 +11704,3 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     DEALLOCATE(r0, r1, drd, dwdx_zero, w0, w1)
   END SUBROUTINE RESIDUAL_FD_DEFORM_PARAM_VTK
 END MODULE BUFLOWMODULE_DIFF
-
