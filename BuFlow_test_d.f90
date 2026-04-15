@@ -151,11 +151,11 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_coarse_ready = .FALSE.
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac(:,:), pc_Ac_inv(:,:)
     ! ===== two-level coarse space: 5 x Nagg =====
-  INTEGER(kind=8), SAVE :: pc_nagg = 64_8
+  INTEGER(kind=8), SAVE :: pc_nagg = 8_8
   INTEGER(kind=8), SAVE :: pc_nc = 0_8
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_agg_id(:)      ! size ncells, 1..pc_nagg
   ! ===== ILU ordering: RCM (apply in factor/solve traversal) =====
-  LOGICAL, SAVE :: pc_use_rcm_order = .FALSE.
+  LOGICAL, SAVE :: pc_use_rcm_order = .TRUE.
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:), pc_iperm(:)
   LOGICAL, SAVE :: pc_use_targeted_boost = .FALSE.
   LOGICAL, SAVE :: pc_use_pschur = .FALSE.
@@ -217,6 +217,10 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_use_gersh_shift = .FALSE.
   REAL(kind=8), SAVE :: pc_gersh_theta = 0.95d0
   REAL(kind=8), SAVE :: pc_gersh_cap_rel = 0.35d0
+  LOGICAL, SAVE :: pc_use_seed_fill = .FALSE.
+  LOGICAL, SAVE :: pc_use_fixed_dd_shift = .FALSE.
+  LOGICAL, SAVE :: pc_use_schur2_fill = .TRUE.
+  REAL(kind=8), SAVE :: pc_schur2_alpha = 0.20d0
   ! ===== pseudo-transient continuation shift for Krylov operator =====
   LOGICAL, SAVE :: pc_use_ptc_shift = .FALSE.
   REAL(kind=8), SAVE :: pc_ptc_alpha = 0.30d0
@@ -539,7 +543,7 @@ CONTAINS
 ! 已知初始时间步
     initdt = 0.0000001
 !36.5       ! 已知总仿真时间!!!!!
-    endtime = 2500
+    endtime = 600
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -8733,18 +8737,22 @@ CONTAINS
 	  REAL(kind=8), PARAMETER :: pc_s_P = 1.0d5, pc_s_T = 3.0d2, pc_s_U = 2.73d2
 
 	  INTEGER(kind=8), ALLOCATABLE :: deg(:), fill(:), nlist(:,:), row_cnt(:)
-	  INTEGER(kind=8) :: j, nnzb, p
+	  INTEGER(kind=8) :: j, nnzb, p, k, nb, slot, extra_cap
 	  LOGICAL :: ok
 	  REAL(kind=8) :: conv_w, diff_w
 	  REAL(kind=8) :: nx, ny, nz, amag, un, a_face, lam_face
 	  REAL(kind=8) :: ux_face, uy_face, uz_face, t_face
 	  REAL(kind=8) :: wtot, mass_coeff, volc
-	  REAL(kind=8) :: dist_on, p_lap
+	  REAL(kind=8) :: dist_on, p_lap, vol_owner, vol_neighbour
 	  REAL(kind=8) :: w_face(5), J5(5,5), Jface(5,5), Jconv(5,5), Jcons(5,5), Jconv_eff(5,5), Jmass_eff(5,5), scale_cons
+	  REAL(kind=8) :: Jrow_owner(5,5), Jrow_neighbour(5,5)
 	    ! ==== robust-PC locals: drop compensation + shifted ILU ====
 	  INTEGER(kind=8) :: ii, pp, jj, i
 	  REAL(kind=8) :: ndiag, nblk, tinyv, drop_th, dropped_sum, compv
 	  REAL(kind=8) :: offsum, shiftv
+      REAL(kind=8) :: dd_req, dd_gap
+      REAL(kind=8) :: seed_budget, seed_acc, seed_val
+      REAL(kind=8) :: seed_norm, seed_blk(5,5)
 	  REAL(kind=8) :: diag_sum, diag_nrm
 	  INTEGER(kind=8) :: diag_cnt
 
@@ -8800,7 +8808,9 @@ CONTAINS
 		deg(neighbourcell) = deg(neighbourcell) + 1_8
 	  END DO
 
-	  ALLOCATE(nlist(ncells, MAXVAL(deg)))
+      ! Limited 2-hop enrichment for Schur-type fill (connectivity only)
+      extra_cap = 2_8
+	  ALLOCATE(nlist(ncells, MAXVAL(deg)+extra_cap))
 	  nlist = 0_8
 	  ALLOCATE(fill(ncells))
 	  fill = 0_8
@@ -8818,6 +8828,24 @@ CONTAINS
 		fill(neighbourcell) = fill(neighbourcell) + 1_8
 		nlist(neighbourcell, fill(neighbourcell)) = ownercell
 	  END DO
+      IF (extra_cap > 0_8) THEN
+        DO c = 1_8, ncells
+          slot = fill(c)
+          DO j = 2_8, fill(c)
+            nb = nlist(c, j)
+            IF (nb < 1_8 .OR. nb > ncells .OR. nb == c) CYCLE
+            DO k = 2_8, fill(nb)
+              IF (slot >= SIZE(nlist,2)) EXIT
+              IF (nlist(nb,k) < 1_8 .OR. nlist(nb,k) > ncells) CYCLE
+              IF (nlist(nb,k) == c) CYCLE
+              slot = slot + 1_8
+              nlist(c,slot) = nlist(nb,k)
+            END DO
+            IF (slot >= fill(c) + extra_cap) EXIT
+          END DO
+          fill(c) = MIN(slot, SIZE(nlist,2,kind=8))
+        END DO
+      END IF
 
 	  ALLOCATE(row_cnt(ncells))
 	  DO c = 1_8, ncells
@@ -8853,6 +8881,7 @@ CONTAINS
 		  p = p + 1_8
 		END DO
 	  END DO
+      CALL PC_SORT_ROWS_AND_SYNC(ncells)
 
       ! ---- variable similarity scaling: A_tilde = D^{-1} * A * D ----
       IF (pc_use_var_scaling) THEN
@@ -8925,14 +8954,21 @@ CONTAINS
 
         IF (pc_use_var_scaling) Jconv = SPREAD(pc_row_inv,2,5) * Jconv * SPREAD(pc_col_scale,1,5)
 
+        ! 体积归一化的面贡献（物理上对应 dR/dW 的行尺度 ~ 1/Vol）
+        ! 这样每个单元行都保持“对角=邻接和”的守恒结构，但修正非均匀网格上的病态尺度差
+        vol_owner = MAX(cvols_mesh(ownercell), 1.0d-30)
+        vol_neighbour = MAX(cvols_mesh(neighbourcell), 1.0d-30)
+        Jrow_owner = Jconv / vol_owner
+        Jrow_neighbour = Jconv / vol_neighbour
+
 		p = pc_diag_pos(ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_owner
 		p = pc_diag_pos(neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_neighbour
 		p = FIND_BLOCK_POS(ownercell, neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_owner
 		p = FIND_BLOCK_POS(neighbourcell, ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jconv
+		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_neighbour
 	  END DO
 	  DO c = 1_8, ncells
 		p = pc_diag_pos(c)
@@ -8944,6 +8980,7 @@ CONTAINS
 		  pc_blk(p,5,5) = pc_blk(p,5,5) + 1.0d-10
 		END IF
 	  END DO
+      IF (pc_use_schur2_fill) CALL PC_ADD_GUARDED_SCHUR2_FILL(ncells, pc_schur2_alpha)
 	  IF (pc_use_pseudo_time_mass .OR. pc_use_auto_mass_stab) THEN
 		DO c = 1_8, ncells
 		  p = pc_diag_pos(c)
@@ -9026,6 +9063,62 @@ CONTAINS
 		  pc_blk(p,5,5) = pc_blk(p,5,5) + pc_diag_eps
 		END IF
 	  END DO	 
+      ! Tiny seeding on empty off-diagonal blocks (default OFF to avoid operator distortion)
+      IF (pc_use_seed_fill) THEN
+        DO ii = 1_8, ncells
+          p = pc_diag_pos(ii)
+          IF (p <= 0_8) CYCLE
+          CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
+          seed_blk = pc_blk(p,:,:)
+          CALL BLOCK_INF_NORM5(seed_blk, seed_norm)
+          IF (seed_norm > 1.0d-30) THEN
+            seed_blk = seed_blk / seed_norm
+          ELSE
+            seed_blk = 0.0_8
+            DO i = 1_8, 5_8
+              seed_blk(i,i) = 1.0_8
+            END DO
+          END IF
+          seed_budget = MAX(1.0d-18, 1.0d-4 * ndiag)
+          seed_acc = 0.0_8
+          DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
+            jj = pc_col_ind(pp)
+            IF (jj == ii) CYCLE
+            CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
+            IF (nblk <= 1.0d-30) THEN
+              seed_val = MIN(1.0d-10*MAX(1.0d0, ndiag), seed_budget-seed_acc)
+              IF (seed_val <= 0.0_8) EXIT
+              pc_blk(pp,:,:) = pc_blk(pp,:,:) - seed_val * seed_blk
+              pc_blk(p ,:,:) = pc_blk(p ,:,:) + seed_val * seed_blk
+              seed_acc = seed_acc + seed_val
+            END IF
+          END DO
+        END DO
+      END IF
+
+      ! Fixed diagonal-dominance shift (default OFF to preserve Jacobian consistency)
+      IF (pc_use_fixed_dd_shift) THEN
+        DO ii = 1_8, ncells
+          p = pc_diag_pos(ii)
+          IF (p <= 0_8) CYCLE
+          CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
+          offsum = 0.0_8
+          DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
+            jj = pc_col_ind(pp)
+            IF (jj == ii) CYCLE
+            CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
+            offsum = offsum + nblk
+          END DO
+          dd_req = 0.15d0 * offsum
+          dd_gap = dd_req - ndiag
+          IF (dd_gap > 0.0_8) THEN
+            DO i = 1_8, 5_8
+              pc_blk(p,i,i) = pc_blk(p,i,i) + dd_gap
+            END DO
+          END IF
+        END DO
+      END IF
+
 	  IF (pc_use_ilut_lite) THEN
 		  CALL BUILD_ILUT_PATTERN_LITE(ncells)
 		  ! 重建对角位置（模式变了）
@@ -11222,6 +11315,103 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 	  DEALLOCATE(q, cm, vis, deg, neigh)
 	END SUBROUTINE PC_BUILD_RCM_ORDER
 
+  SUBROUTINE PC_SORT_ROWS_AND_SYNC(ncells)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: ncells
+    INTEGER(kind=8) :: i, p0, p1, lenr, a, b, min_idx, tmp_col
+    INTEGER(kind=8) :: tmp_diag
+    REAL(kind=8) :: tmp_blk(5,5)
+
+    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+    IF (.NOT. ALLOCATED(pc_diag_pos)) RETURN
+
+    DO i = 1_8, ncells
+      p0 = pc_row_ptr(i)
+      p1 = pc_row_ptr(i+1_8) - 1_8
+      lenr = p1 - p0 + 1_8
+      IF (lenr <= 1_8) CYCLE
+
+      DO a = p0, p1-1_8
+        min_idx = a
+        DO b = a+1_8, p1
+          IF (pc_col_ind(b) < pc_col_ind(min_idx)) min_idx = b
+        END DO
+        IF (min_idx /= a) THEN
+          tmp_col = pc_col_ind(a)
+          pc_col_ind(a) = pc_col_ind(min_idx)
+          pc_col_ind(min_idx) = tmp_col
+
+          tmp_blk = pc_blk(a,:,:)
+          pc_blk(a,:,:) = pc_blk(min_idx,:,:)
+          pc_blk(min_idx,:,:) = tmp_blk
+        END IF
+      END DO
+    END DO
+
+    pc_diag_pos = 0_8
+    DO i = 1_8, ncells
+      tmp_diag = FIND_BLOCK_POS(i, i)
+      pc_diag_pos(i) = tmp_diag
+    END DO
+  END SUBROUTINE PC_SORT_ROWS_AND_SYNC
+
+  SUBROUTINE PC_ADD_GUARDED_SCHUR2_FILL(ncells, alpha)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: ncells
+    REAL(kind=8), INTENT(IN) :: alpha
+    INTEGER(kind=8) :: i, k, j, p_ik, p_kj, p_ij, pdiag
+    REAL(kind=8) :: Aik(5,5), Akj(5,5), Dk_inv(5,5), tmp(5,5), sfill(5,5)
+    REAL(kind=8) :: ndiag, nblk, add_cap, add_acc
+    LOGICAL :: inv_ok
+
+    IF (alpha <= 0.0_8) RETURN
+    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+    IF (.NOT. ALLOCATED(pc_diag_pos)) RETURN
+
+    DO i = 1_8, ncells
+      pdiag = pc_diag_pos(i)
+      IF (pdiag <= 0_8) CYCLE
+      CALL BLOCK_INF_NORM5(pc_blk(pdiag,:,:), ndiag)
+      add_cap = MAX(1.0d-18, 5.0d-3 * ndiag)
+      add_acc = 0.0_8
+
+      DO p_ik = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+        k = pc_col_ind(p_ik)
+        IF (k == i) CYCLE
+        IF (k < 1_8 .OR. k > ncells) CYCLE
+        IF (pc_diag_pos(k) <= 0_8) CYCLE
+
+        CALL INVERT_5X5(pc_blk(pc_diag_pos(k),:,:), Dk_inv, inv_ok)
+        IF (.NOT. inv_ok) CYCLE
+        Aik = pc_blk(p_ik,:,:)
+
+        DO p_kj = pc_row_ptr(k), pc_row_ptr(k+1_8)-1_8
+          j = pc_col_ind(p_kj)
+          IF (j == i .OR. j == k) CYCLE
+          IF (j < 1_8 .OR. j > ncells) CYCLE
+
+          p_ij = FIND_BLOCK_POS(i, j)
+          IF (p_ij <= 0_8) CYCLE
+          CALL BLOCK_INF_NORM5(pc_blk(p_ij,:,:), nblk)
+          IF (nblk > 1.0d-30) CYCLE
+
+          Akj = pc_blk(p_kj,:,:)
+          CALL MATMUL5(Aik, Dk_inv, tmp)
+          CALL MATMUL5(tmp, Akj, sfill)
+          sfill = -alpha * sfill
+
+          CALL BLOCK_INF_NORM5(sfill, nblk)
+          IF (nblk <= 0.0_8) CYCLE
+          IF (add_acc + nblk > add_cap) CYCLE
+
+          pc_blk(p_ij,:,:) = pc_blk(p_ij,:,:) + sfill
+          pc_blk(pdiag,:,:) = pc_blk(pdiag,:,:) - sfill
+          add_acc = add_acc + nblk
+        END DO
+      END DO
+    END DO
+  END SUBROUTINE PC_ADD_GUARDED_SCHUR2_FILL
+
 	SUBROUTINE FACTOR_BLOCK_ILU0(ncells, ok)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
@@ -11622,4 +11812,3 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
     DEALLOCATE(r0, r1, drd, dwdx_zero, w0, w1)
   END SUBROUTINE RESIDUAL_FD_DEFORM_PARAM_VTK
 END MODULE BUFLOWMODULE_DIFF
-
