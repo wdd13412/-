@@ -115,272 +115,86 @@ MODULE BUFLOWMODULE_DIFF
   LOGICAL, SAVE :: pc_block_jacobi_ready = .FALSE.
   ! ===== 右預條件狀態：預設關閉（保持無預處理可用）=====
   LOGICAL, SAVE :: pc_ready = .FALSE.
+    ! .TRUE.：COMPUTE_STEADY_RESIDUAL_D 使用UNSTRUCTURED_JSTFLUXX_D（耗散切线近邻/截断远端链，供预处理等）
+  ! .FALSE.：完整 UNSTRUCTURED_JSTFLUX_D（TANGENT_MATVEC / 真实 Jacobian 方向）
+  LOGICAL, SAVE :: use_jstepss_for_steady_residual_d = .FALSE.
   INTEGER(kind=8), SAVE :: pc_ncells = 0_8
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_diag_inv(:, :, :)  ! (ncells,5,5)
     ! ===== block-ILU(0) 预处理存储 =====
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_row_ptr(:)      ! 1..ncells+1
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_col_ind(:)      ! 1..nnzb
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_blk(:, :, :)       ! (nnzb,5,5), 存 L/U 合并块
+  REAL(kind=8), ALLOCATABLE, SAVE :: pc_A0(:, :, :)        ! (nnzb,5,5), ILU前的原始组装矩阵（用于稳健fallback）
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_uinv(:, :, :)      ! (ncells,5,5), U 对角块逆
   INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_diag_pos(:)     ! (ncells)
-  ! 预条件组装后的原始块矩阵 A0（在 ILU 分解前备份）
-  REAL(kind=8), ALLOCATABLE, SAVE :: pc_a0_blk(:, :, :)   ! (nnzb,5,5)
-  LOGICAL, SAVE :: pc_a0_ready = .FALSE.
+  ! 對角塊上額外加入的 damp+tshift（每變數一樣大）；供診斷 Av vs「組裝 J」時回退
+  REAL(kind=8), ALLOCATABLE, SAVE :: pc_diag_extra(:)
   REAL(kind=8), SAVE :: pc_row_scale(5), pc_col_scale(5)
   REAL(kind=8), SAVE :: pc_row_inv(5), pc_col_inv(5)
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_dr(:, :)   ! (ncells,5) 行缩放
   REAL(kind=8), ALLOCATABLE, SAVE :: pc_dc(:, :)   ! (ncells,5) 列缩放
-    ! === PC 鲁棒增强开关 ===
-  LOGICAL, SAVE :: pc_use_equil = .TRUE.          ! 块缩放
-  LOGICAL, SAVE :: pc_use_offdiag_drop = .FALSE.   ! 非对角门限裁剪
-  INTEGER(kind=8), SAVE :: pc_equil_iters = 2_8   ! Ruiz迭代次数(1~3)
-  REAL(kind=8), SAVE :: pc_drop_rel = 1.0d-3 !1.0d-3      ! 非对角相对阈值
-  REAL(kind=8), SAVE :: pc_offdiag_cap = 5.0d0    ! 非对角块范数上限倍数(相对对角)
-  REAL(kind=8), SAVE :: pc_diag_eps = 1.0d-10     ! 你已有类似项可复用
-  REAL(kind=8), ALLOCATABLE, SAVE :: pc_eqL(:), pc_eqR(:)  ! 每cell缩放
-  INTEGER(kind=8), SAVE :: pc_keep_topk = 6_8      ! 每行至少保留的强非对角块数
-  LOGICAL, SAVE :: pc_use_ilut_lite = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_ilut_extra_per_row = 2_8
-  REAL(kind=8), SAVE :: pc_ilut_drop_rel = 1.0d-3
-  LOGICAL, SAVE :: pc_use_shifted_ilu = .FALSE.!启用反而更差
-  REAL(kind=8), SAVE :: pc_shift_alpha = 1.0d-4!5.0d-2
-  LOGICAL, SAVE :: pc_use_drop_comp = .FALSE.
-  REAL(kind=8), SAVE :: pc_drop_comp_beta = 0.8d0
-  ! ===== 与 ADflow 默认 NK 预条件 AMG 选项对齐（见官方文档 options：NKAMGLevels=2, NKAMGNSmooth=1）=====
-  ! 「层数」：ADflow 默认为 2（细网 + 一层粗网）。本代码用 pc_use_two_level：细网 ILU + 聚合粗校正，对应 2 层思想。
-  INTEGER(kind=8), PARAMETER :: PC_ADFLOW_NK_AMG_NSMOOTH = 1_8
-    ! ===== two-level coarse correction (5 coarse modes: P,T,Ux,Uy,Uz constants) =====
-  LOGICAL, SAVE :: pc_use_two_level = .FALSE.
-  LOGICAL, SAVE :: pc_coarse_ready = .FALSE.
-  REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac(:,:), pc_Ac_inv(:,:)
-    ! ===== two-level coarse space: 5 x Nagg =====
-  INTEGER(kind=8), SAVE :: pc_nagg = 8_8
-  INTEGER(kind=8), SAVE :: pc_nc = 0_8
-  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_agg_id(:)      ! size ncells, 1..pc_nagg
-  ! ===== ILU ordering: RCM (apply in factor/solve traversal) =====
-  LOGICAL, SAVE :: pc_use_rcm_order = .TRUE.
-  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:), pc_iperm(:)
-  LOGICAL, SAVE :: pc_use_targeted_boost = .FALSE.
-  LOGICAL, SAVE :: pc_use_pschur = .FALSE.
-	INTEGER(kind=8), SAVE :: pc_pschur_sweeps = 2_8
-	REAL(kind=8), SAVE :: pc_pschur_diag_eps = 1.0d-10
-  ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
-  LOGICAL, SAVE :: pc_use_flux_jacobian = .FALSE.
-  REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
-  ! ===== variable similarity scaling for PC matrix: A_tilde = D^{-1} A D =====
-  LOGICAL, SAVE :: pc_use_var_scaling = .FALSE.
-  REAL(kind=8), SAVE :: pc_var_scale_p = 8.0d0
-  REAL(kind=8), SAVE :: pc_var_scale_t = 2.0d0
-  REAL(kind=8), SAVE :: pc_var_scale_u = 1.5d0
-  LOGICAL, SAVE :: pc_use_cons_right_transform = .FALSE.
-  REAL(kind=8), SAVE :: pc_cons_floor = 1.0d-10
-  LOGICAL, SAVE :: pc_use_pseudo_time_mass = .FALSE.
-  LOGICAL, SAVE :: pc_use_auto_mass_stab = .FALSE.
-  REAL(kind=8), SAVE :: pc_mass_auto_beta = 0.08d0
-  REAL(kind=8), SAVE :: pc_mass_cfl = 0.60d0
-  REAL(kind=8), SAVE :: pc_mass_floor = 1.0d-8
-  LOGICAL, SAVE :: pc_use_pressure_laplace_reg = .FALSE.
-  REAL(kind=8), SAVE :: pc_press_laplace_beta = 0.01d0
-  ! ===== AM^{-1} polynomial defect-correction =====
-  LOGICAL, SAVE :: pc_use_am1 = .FALSE.
-  REAL(kind=8), SAVE :: pc_am1_omega = 0.70d0
-  LOGICAL, SAVE :: pc_use_am_poly = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_am_poly_steps = 2_8
-  REAL(kind=8), SAVE :: pc_am_poly_omega0 = 0.75d0
-  REAL(kind=8), SAVE :: pc_am_poly_omega_decay = 0.85d0
-  REAL(kind=8), SAVE :: pc_am_poly_omega_min = 0.20d0
-  ! ===== stronger two-level multiplicative cycle =====
-  INTEGER(kind=8), SAVE :: pc_two_level_cycles = 1_8
-  INTEGER(kind=8), SAVE :: pc_two_level_presmooth = PC_ADFLOW_NK_AMG_NSMOOTH
-  INTEGER(kind=8), SAVE :: pc_two_level_postsmooth = PC_ADFLOW_NK_AMG_NSMOOTH
-  REAL(kind=8), SAVE :: pc_two_level_omega = 0.85d0
-  LOGICAL, SAVE :: pc_use_coarse_pv_schur = .TRUE.
-  LOGICAL, SAVE :: pc_use_coarse_div_mode = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_div_modes = 3_8
-  REAL(kind=8), SAVE :: pc_div_rhs_blend = 0.60d0
-  REAL(kind=8), SAVE :: pc_div_mode_vel_gain = 0.08d0
-  LOGICAL, SAVE :: pc_use_schur_split = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_schur_sweeps = 3_8
-  REAL(kind=8), SAVE :: pc_schur_omega = 0.65d0
-  INTEGER(kind=8), SAVE :: pc_schur_u_sweeps = 2_8
-  REAL(kind=8), SAVE :: pc_schur_u_omega = 0.80d0
-  REAL(kind=8), SAVE :: pc_schur_post_ilu = 0.30d0
-  REAL(kind=8), SAVE :: pc_schur_u_diag_boost = 0.00d0
-  REAL(kind=8), SAVE :: pc_schur_diag_couple = 0.00d0
-  ! ===== PCD/LSC-inspired coarse pressure Schur blend =====
-  LOGICAL, SAVE :: pc_use_pcd_lsc_mix = .TRUE.
-  REAL(kind=8), SAVE :: pc_pcd_laplace_blend = 0.20d0
-  REAL(kind=8), SAVE :: pc_pcd_mass_beta = 0.02d0
-  REAL(kind=8), SAVE :: pc_pcd_u_diag_boost = 0.10d0
-  REAL(kind=8), SAVE :: pc_coarse_pv_vel_relax = 0.20d0
-  REAL(kind=8), ALLOCATABLE, SAVE :: pc_div_basis(:, :)   ! (ncells,3), 低频散度模态基
-  REAL(kind=8), ALLOCATABLE, SAVE :: pc_duu_inv(:, :, :)  ! (ncells,4,4), momentum/energy block inverse
-  REAL(kind=8), ALLOCATABLE, SAVE :: pc_Ac_p(:,:), pc_Ac_p_inv(:,:)
-  ! ===== Gershgorin-like diagonal dominance stabilization =====
-  LOGICAL, SAVE :: pc_use_gersh_shift = .FALSE.
-  ! ===== ILU 失稳定位：打印最差 5x5 对角块 =====
-  LOGICAL, SAVE :: pc_dump_worst_ilu_block = .TRUE.
-  REAL(kind=8), SAVE :: pc_dump_ilu_cond_thr = 1.0d10
-  REAL(kind=8), SAVE :: pc_gersh_theta = 0.95d0
-  REAL(kind=8), SAVE :: pc_gersh_cap_rel = 0.35d0
-  ! ===== pseudo-transient continuation shift for Krylov operator =====
-  LOGICAL, SAVE :: pc_use_ptc_shift = .FALSE.
-  REAL(kind=8), SAVE :: pc_ptc_alpha = 0.30d0
-  REAL(kind=8), SAVE :: pc_ptc_alpha_max = 1.20d0
-  REAL(kind=8), SAVE :: pc_ptc_alpha_min = 0.05d0
-  REAL(kind=8), SAVE :: pc_ptc_inc = 1.25d0
-  REAL(kind=8), SAVE :: pc_ptc_dec = 0.85d0
-  REAL(kind=8), SAVE :: pc_ptc_outer_damp = 0.65d0
-  REAL(kind=8), SAVE :: pc_ptc_outer_damp_min = 0.20d0
-  REAL(kind=8), SAVE :: pc_ptc_outer_damp_max = 0.95d0
-  REAL(kind=8), SAVE :: pc_ptc_outer_grow = 1.08d0
-  REAL(kind=8), SAVE :: pc_ptc_outer_shrink = 0.82d0
-  REAL(kind=8), SAVE :: pc_ptc_eta_floor = 0.03d0
-  REAL(kind=8), SAVE :: pc_ptc_eta_ceiling = 0.70d0
-  REAL(kind=8), SAVE :: pc_ptc_power = 1.0d0
-  REAL(kind=8), SAVE :: pc_ptc_min_rel = 1.0d-3
-  REAL(kind=8), SAVE :: pc_a0_diag_mean = 1.0_8
-  LOGICAL, SAVE :: pc_use_colored_ad = .TRUE.
-  INTEGER(kind=8), SAVE :: pc_res_conn_level = 2_8
-  LOGICAL, SAVE :: pc_use_full_ad_pattern_refresh = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_full_ad_pattern_period = 8_8
-  LOGICAL, SAVE :: pc_full_ad_pattern_ready = .FALSE.
-  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_cached_col_ptr(:)
-  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_cached_row_ind(:)
-  ! 主路径：稀疏图上的 graph coloring + 批量前向 AD 组装预条件矩阵（窄模板/L1）
-  ! 与 ADflow/DAFoam 常见的「matrix-free Jv + 稀疏显式 Jacobian 预条件」一致。
-  LOGICAL, SAVE :: pc_use_lagged_update = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_lag_steps = 4_8
-  INTEGER(kind=8), SAVE :: pc_build_calls = 0_8
-  LOGICAL, SAVE :: pc_force_rebuild_next = .FALSE.
-  REAL(kind=8), SAVE :: pc_last_true_relres = -1.0_8
-  REAL(kind=8), SAVE :: pc_rebuild_relres_trigger = 5.0d0
-  REAL(kind=8), SAVE :: pc_rebuild_growth_trigger = 1.25d0
-  REAL(kind=8), SAVE :: pc_pattern_drop_tol = 1.0d-16
-  ! 默认关：与 matrix-free 切线一致（若在 PC 组装单独开 Hicken 会造成 M 与 A 不一致）
+    ! 与 BuFlow_test_d.f90 一致：ILU 前 Ruiz 式块行列均衡（仅作用于 pc_blk）
+  LOGICAL, SAVE :: pc_use_equil = .TRUE.
+  INTEGER(kind=8), SAVE :: pc_equil_iters = 2_8
+  REAL(kind=8), ALLOCATABLE, SAVE :: pc_eqL(:), pc_eqR(:)
+  ! FACTOR_BLOCK_ILU0 内与 d.f90 同名；d7 若 pc_use_rcm=T 已由 PC_PERMUTE 重排存储，此处须保持 .FALSE.
+  LOGICAL, SAVE :: pc_use_rcm_order = .FALSE.
+  LOGICAL, SAVE :: pc_dbg_enable = .FALSE.
+  INTEGER(kind=8), SAVE :: pc_dbg_mvar = -1_8
+  INTEGER(kind=8), SAVE :: pc_dbg_color = -1_8
+  LOGICAL, ALLOCATABLE, SAVE :: pc_dbg_rowmask(:)
+  ! PC 专用 Jacobian 近似（Hicken A1 思路）：eps4->0, eps2<-eps2+sigma*eps4
   LOGICAL, SAVE :: pc_use_hicken_a1 = .FALSE.
   REAL(kind=8), SAVE :: pc_hicken_sigma = 5.0d0
-  ! 着色 AD 构建阶段的稳定优先策略（仅影响预条件矩阵组装，不影响主残差定义）
-  LOGICAL, SAVE :: pc_colored_stable_mode = .TRUE.
-  ! ADflow：matrix-free 与 PC 矩阵可用 usePC 等不同模板阶数，但耗散/人工粘性应与 ∂R/∂w 一致。
-  ! 若为 .TRUE. 会在 PC 组装强行打开 Hicken，而 TANGENT_MATVEC 从不调用 SET_PC_HICKEN_A1，
-  ! 导致 M 与 A 在同一线性化点上不一致。默认 .FALSE. 与切线对齐。
-  LOGICAL, SAVE :: pc_colored_force_hicken = .FALSE.
-  REAL(kind=8), SAVE :: pc_colored_hicken_sigma = 5.0d0
-  ! 着色AD构建后的块过滤（仅作用于预条件矩阵构建阶段）
-  REAL(kind=8), SAVE :: pc_colored_drop_rel = 1.0d-8
-  REAL(kind=8), SAVE :: pc_colored_offdiag_cap = 2.0d0
-  LOGICAL, SAVE :: pc_colored_row_balance = .FALSE.
-  REAL(kind=8), SAVE :: pc_colored_row_target = 1.0d0
-  REAL(kind=8), SAVE :: pc_colored_row_floor = 1.0d-8
-  LOGICAL, SAVE :: pc_colored_similarity_scale = .FALSE.
-  ! 勿默认开启：对 M^{-1}v 做范数截断会使预条件非线性，GMRES/Flexible GMRES 失去固定右预条件假设，易真残差爆炸。
-  LOGICAL, SAVE :: pc_use_amp_guard = .FALSE.
-  REAL(kind=8), SAVE :: pc_amp_guard_ratio = 5.0d1
-  ! ADflow 一致性优先：在线性求解阶段关闭会破坏固定线性右预条件假设的路径。
-  LOGICAL, SAVE :: pc_adflow_strict_linear_pc = .TRUE.
-  ! ADflow/PETSc：对 dRdwPre 用子域 ILU 等解 Mz=v，利用完整稀疏模式；仅块对角逆常严重放大 ||z||。
-  LOGICAL, SAVE :: pc_colored_use_diag_only = .FALSE.
-  LOGICAL, SAVE :: pc_dafoam_consistency_mode = .TRUE.
-  ! 将残差输出统一映射到原始变量空间：Rw = (dw/du) * Ru
-  LOGICAL, SAVE :: residual_in_primitive_space = .TRUE.
-  LOGICAL, SAVE :: residual_mapping_fd_check = .TRUE.
-  LOGICAL, SAVE :: residual_mapping_fd_checked = .FALSE.
-  ! 当前预条件矩阵是否来自着色 AD（与 Krylov 中 matrix-free 算子近似不同属预期）
-  LOGICAL, SAVE :: pc_matrix_from_colored_ad = .FALSE.
-  ! ADflow NK：PETSc 上 globalPC=ASM、localPC=ILU、NK_innerPreConIts / NK_outerPreConIts（Richardson 套 PC），
-  ! 等价于「子域 ILU + 重叠 + 多次套用 + 常配合粗层/多网格」。本机无 MPI ASM 时，最接近的結構是：
-  ! 块 ILU(0) 后接 AM^{-1} 型缺陷校正（pc_use_am1）+ 聚合粗校正（pc_use_two_level）。
-  ! 若 .TRUE. 則對著色 AD 關掉上述全局強化，只剩單次 ILU，易使 ‖A·(M^{-1}v)‖ 譜條件極差、相對殘差長期卡在 O(1)。
-  LOGICAL, SAVE :: pc_colored_light_apply = .FALSE.
-  REAL(kind=8), SAVE :: pc_colored_dd_frac = 0.45d0
-  ! 着色 AD 块对角加强（PC_POSTPROCESS）；B=AM^{-1} 病态时可略增（过大则 M 偏离 ∂R/∂w 更远）
-  REAL(kind=8), SAVE :: pc_colored_diag_stab = 1.3d-2
-  ! === 對齊 ADflow NK_innerPreConIts：對 A0 殘差重複「ILU 修正」（stationary Richardson）；預設關閉以省成本 ===
-  LOGICAL, SAVE :: pc_use_inner_richardson = .TRUE.
-  INTEGER(kind=8), SAVE :: pc_inner_rich_iters = 2_8
-  REAL(kind=8), SAVE :: pc_inner_rich_omega = 0.90d0
-  ! 週期性全模板 Tapenade AD 重建 M（昂貴）；預設關閉
-  LOGICAL, SAVE :: pc_use_full_ad_periodic = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_full_ad_period = 7_8
-  ! A/B 診斷：僅開 AM1 缺陷步或僅開兩層粗校正（勿同時 .TRUE.；同時時以 AM1-only 為準）
-  LOGICAL, SAVE :: pc_ab_force_am1_only = .FALSE.
-  LOGICAL, SAVE :: pc_ab_force_twolv_only = .FALSE.
-  ! 以下為「效果未必明顯、成本較高」路徑：程式保留，**預設全關**；需要實驗時再改為 .TRUE.
-  ! 每次 BUILD_PC_JST_L1 皆用全模板 Tapenade AD 組預條件（與 TANGENT_MATVEC 同源；極慢、記憶體大）
-  LOGICAL, SAVE :: pc_use_full_ad_jacobian_pc = .FALSE.
-  ! 單進程近似：加性子域 ILU(0) + 面鄰重疊 + 與全局 ILU 混合（僅在 pc_a0 已備時由 PC_POSTPROCESS 建置）
-  TYPE :: PC_ASM_DOM_T
-    INTEGER(kind=8) :: nloc = 0_8
-    INTEGER(kind=8) :: nnzb = 0_8
-    INTEGER(kind=8), ALLOCATABLE :: glob_cell(:)
-    INTEGER(kind=8), ALLOCATABLE :: row_ptr(:)
-    INTEGER(kind=8), ALLOCATABLE :: col_ind(:)
-    INTEGER(kind=8), ALLOCATABLE :: diag_pos(:)
-    REAL(kind=8), ALLOCATABLE :: blk(:, :, :)
-    REAL(kind=8), ALLOCATABLE :: uinv(:, :, :)
-  END TYPE PC_ASM_DOM_T
-  LOGICAL, SAVE :: pc_use_asm_subdomain_ilu = .FALSE.
-  INTEGER(kind=8), SAVE :: pc_asm_nparts = 12_8
-  INTEGER(kind=8), SAVE :: pc_asm_overlap_layers = 2_8
-  INTEGER(kind=8), SAVE :: pc_asm_max_ext_cells = 0_8
-  REAL(kind=8), SAVE :: pc_asm_blend_global_ilu = 0.72d0
-  LOGICAL, SAVE :: pc_asm_ready = .FALSE.
-  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_asm_wcount(:)
-  TYPE(PC_ASM_DOM_T), ALLOCATABLE, SAVE :: pc_asm_dom(:)
-  INTEGER(kind=8), SAVE :: pc_asm_build_id = 0_8
 
-	! 压力Schur近似：标量稀疏（沿用cell邻接图）
-	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_diag(:)      ! (ncells)
-	REAL(kind=8), ALLOCATABLE, SAVE :: pc_sp_off(:)       ! (nnzb) 仅邻接项，含对角位可复用
-	LOGICAL, SAVE :: pc_sp_ready = .FALSE.
-  REAL(kind=8), ALLOCATABLE, SAVE :: point_updated_rhs(:, :)
-  LOGICAL, SAVE :: debug_heavy_io = .FALSE.
-  LOGICAL, SAVE :: use_conservative_unknown_operator = .FALSE.
-  LOGICAL, SAVE :: use_primitive_residual_operator = .FALSE.
-  REAL(kind=8), ALLOCATABLE, SAVE :: operator_transform_tmp(:)
-  ! ===== recycle-subspace storage (literature route: augmented restarted GMRES) =====
-  LOGICAL, SAVE :: gmres_recycle_enabled = .FALSE.
-  ! Arnoldi 第二遍 MGS（與 PETSc GMRES refinement、DAFoam 高精度 Krylov 一致）
-  LOGICAL, SAVE :: gmres_arnoldi_two_pass = .TRUE.
-  ! 切線 GMRES 強制不用 PC（z=v；診斷 M 是否與 matrix-free A 譜不匹配）
-  LOGICAL, SAVE :: gmres_tangent_skip_pc = .FALSE.
-  LOGICAL, SAVE :: tangent_verify_jv_fd_once = .TRUE.
-  LOGICAL, SAVE :: tangent_verify_rhs_fd_once = .TRUE.
-  LOGICAL, SAVE :: pc_check_color_interference_once = .TRUE.
-  LOGICAL, SAVE :: pc_check_minv_accuracy_once = .TRUE.
-  INTEGER(kind=8), SAVE :: gmres_recycle_max_vecs = 6_8
-  INTEGER(kind=8), SAVE :: gmres_recycle_n = 0_8
-  INTEGER(kind=8), SAVE :: gmres_recycle_cols = 0_8
-  REAL(kind=8), SAVE :: gmres_recycle_min_norm = 1.0d-12
-  REAL(kind=8), ALLOCATABLE, SAVE :: gmres_recycle_p(:, :)   ! search vectors in solver unknown space
-  REAL(kind=8), ALLOCATABLE, SAVE :: gmres_recycle_ap(:, :)  ! A*p for zero-shift operator
-  ! ------------------------------------------------------------------
-  ! 【切线/预条件：常调参数集中于此文件】
-  ! ADflow：Krylov 用 matrix-free；预条件用较便宜/较窄模板的显式 Jacobian，并常滞后更新（见 mdolab-adflow solvers）。
-  ! DAFoam：伴随线性系统多用 PETSc（FGMRES + ASM/ILU 等）；单机无法复制分布式 ASM，但「稀疏显式 J + 着色 AD」是同一条思想线。
-  ! 本代码默认固定走着色 AD + 面邻窄模板（L1）构建。
-  ! === ADflow（mdolab/adflow）對照 — 為何「調參」難達 1e-5 相對殘差 ===
-  ! FormJacobianNK 裡 setupStateResidualMatrix(dRdwPre, useAD, usePC=.True., ...)：usePC=.True. 時
-  !   用 euler_pc_stencil / visc_pc_stencil（一階窄模板）、lumpedDiss、聲學因子暫置、湍流一階等；
-  !   且「不對激波感測器線性化」、先 referenceShockSensor（見 adjointUtils.F90 註釋）。
-  ! MatMFFD 的 dRdw 仍是完整 residual 的 matrix-free。亦即：ADflow 刻意讓 **P ≈ 一階窄算子**、**A 為真算子**，
-  ! 兩者不同但 **同一套 residual 程式與旗標體系** 保證不會像本專案「L1 塊矩陣 + 全模板 Tapenade A」差到譜半徑爆炸。
-  ! 與 ADflow 的差距主要在 **usePC 窄算子 + 耗散/激波處理旗標**；若譜仍差，宜審 TANGENT_MATVEC 與
-  ! BUILD_PC_MATRIX_COLORED_AD 的種子/變數空間/Hicken 一致性。全模板 AD 組 M（pc_use_full_ad_jacobian_pc）僅供實驗、預設關。
-  ! 相對殘差要達 1e-5：可試 PTC，或實作 ADflow 式「PC 專用耗散/凍結 sj」分支（需在 UNSTRUCTURED_JSTEPS_D 等處加旗標）。
-  ! 说明：若有人提到「PC 组装/apply 时间上限」，泛指你愿意接受的算力预算——组装 M 一次要多快、
-  !       每次套用 M^{-1} 要多快；与层数默认值无关，需按网格规模自行权衡。
-  ! 日志：[PC-ABORT] 表示未分配 eps/网格工作数组。
-  ! ------------------------------------------------------------------
-  INTEGER(kind=8), SAVE :: tangent_linear_ir_steps = 1_8
-  ! 外層輪數與子空間：過大則每線性步極慢；相對殘差 1e-5 需「M≈A」或 PTC，不能只堆 Krylov 維度。
-  INTEGER(kind=8), SAVE :: tangent_gmres_max_outer = 12_8
-  INTEGER(kind=8), SAVE :: tangent_gmres_restart = 90_8
-  ! 右预条件 GMRES 更新 x <- x + omega*ptc*z 中對 z 的額外阻尼（0~1）；||A z|| 極大時可試 0.25~0.5
-  REAL(kind=8), SAVE :: tangent_gmres_dx_damp = 1.0_8
-  ! 無 PTC 時，外層 k>1：eta_k = max(本下限, 0.5*eta_prev^phi)；原硬編 0.2 易使 res_ls≤eta*β 過嚴
-  REAL(kind=8), SAVE :: tangent_gmres_eta_floor = 0.42_8
+  ! 预处理器统计（用于判断“稳/改善谱”是否成立）
+  INTEGER(kind=8), SAVE :: pc_stat_calls = 0_8
+  INTEGER(kind=8), SAVE :: pc_stat_ilu_fallback = 0_8
+  INTEGER(kind=8), SAVE :: pc_stat_gs_unstable = 0_8
+  REAL(kind=8), SAVE :: pc_stat_amp_max = 0.0_8
+  ! 建完 pc_A0 後做一次：||TANGENT_MATVEC*v - pc_A0*v||/||TANGENT_MATVEC*v||（判近似/模板是否偏离 A）
+  LOGICAL, SAVE :: pc_av_mv_check = .TRUE.
+  ! 预条件扰动（与 Newton/切线 Jacobian 对齐：默认关掉大块“伪时间对角”，避免 AM^{-1} 离 I 太远）
+  REAL(kind=8), SAVE :: pc_diag_tau = 0.0d0
+  REAL(kind=8), SAVE :: pc_diag_tau_boost = 5.0d-2
+  REAL(kind=8), SAVE :: pc_diag_rel_floor = 1.0d-10
+  REAL(kind=8), SAVE :: pc_tshift_factor = 0.0d0
+  ! ILU(0) 首次失败时相对加对角（相对当前对角元），仅为可分解性
+  REAL(kind=8), SAVE :: pc_ilu_retry_diag = 1.0d-6
+  ! 仅用于预条件矩阵：按块无穷范添加对角，使 block ILU(0) 前/后代不会爆炸（与 A 不完全一致，属论文里常做的“可分解稳健化”）
+  ! 若此前 tau/tshift=0 时 ||M^{-1}||、||z|| 爆炸，应提高此系数（例如 1d-2～5d-2），再按需微调。
+  REAL(kind=8), SAVE :: pc_ilu_diag_stab = 4.0d-2
+  ! stab = coeff*max(1,min(ainfn, cap_ainfn))；避免 ||J||_inf 极大时 ILU 对角与 J 完全失配
+  REAL(kind=8), SAVE :: pc_ilu_stab_ainfn_cap = 2.0d7
+  ! >0 时再限制 stab 绝对上限；0 表示不用
+  REAL(kind=8), SAVE :: pc_ilu_stab_abs_cap = 0.0d0
+  ! .TRUE.：两阶段全 AD 扫稀疏模式 + 组装（仅实验/诊断；约 10×ncells 次 RESIDUAL_D，与论文常规“拓扑定模板+单次组装”不同，默认勿开）
+  LOGICAL, SAVE :: pc_full_ad_pattern = .TRUE.
+    ! .TRUE.：组装完 pc_blk 后将所有非对角 5×5 块置 0，仅保留 (cell,cell) 对角块（用于诊断非对角过小/奇异导致的 ILU 问题）
+  LOGICAL, SAVE :: pc_precond_diag_blocks_only = .FALSE.
+  REAL(kind=8), SAVE :: pc_diag_jacobi_eps = 1.0d-10
+  REAL(kind=8), SAVE :: pc_pattern_drop_tol = 1.0d-16
+  ! ---------- Hicken & Zingg (AIAA J., DOI 10.2514/1.34810) 式(17)(828) 对齐 ----------
+  ! T：对角「逆局部伪时间步」T_ii=1/dt_local；预条件子块 ILU 针对 (T + A1) 时打开 pc_tzinger_in_pc。
+  ! Krylov 算子 (T+J) 与切线方程 Jx=b 一般不等价，默认 pc_tzinger_in_krylov=F（仅 Newton 式(17) 时打开）。
+  LOGICAL, SAVE :: pc_tzinger_in_pc = .FALSE.
+  LOGICAL, SAVE :: pc_tzinger_in_krylov = .FALSE.
+  REAL(kind=8), SAVE :: pc_tzinger_gamma = 2.0d0
+  REAL(kind=8), SAVE :: pc_tzinger_dt_floor = 1.0d-12
+  REAL(kind=8), SAVE :: pc_tzinger_dt_ref = 0.0d0
+  ! 用 ||R||_2 推 dt 时可乘该因子(<1 则减弱 dt 随残差放大)；默认 1
+  REAL(kind=8), SAVE :: pc_tzinger_eta_scale = 1.0d0
+  ! >0 时限制 pc_tzinger_dt_ref 上界，避免 dt 极大、T=1/dt 相对 J 可忽略且与 stab 尺度脱节
+  REAL(kind=8), SAVE :: pc_tzinger_dt_ref_cap = 1.0d6
+  REAL(kind=8), ALLOCATABLE, SAVE :: pc_tzinger_T(:)
+  ! ---------- ILU 可解性：RCM 重排序（对称置换）、可选诊断 5×5 ----------
+  ! perm(k)、inv_perm(c)：第 k 个消元行对应原单元 perm(k)；原单元 c 的新行号为 inv_perm(c)
+  LOGICAL, SAVE :: pc_use_rcm = .FALSE.
+  LOGICAL, SAVE :: pc_rcm_active = .FALSE.
+  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_perm(:)
+  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_inv_perm(:)
+  LOGICAL, SAVE :: pc_print_jac5x5 = .TRUE.
+  INTEGER(kind=8), ALLOCATABLE, SAVE :: pc_iperm(:)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 CONTAINS
@@ -669,7 +483,7 @@ CONTAINS
 ! 已知初始时间步
     initdt = 0.0000001
 !36.5       ! 已知总仿真时间!!!!!
-    endtime = 600
+    endtime = 800
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -737,7 +551,7 @@ CONTAINS
     status_val%nextoutputtime = outputinterval
     status_val%endtime = endtime
     IF (.NOT.silent) PRINT*, 'Starting iterations'
-    IF (debug_heavy_io) PRINT*, 'a2'
+    PRINT*, 'a2'
 !这里primitives没问题
     DO WHILE (status_val%currenttime .LT. status_val%endtime)
       CALL ADJUSTTIMESTEP_LTS(targetcfl, dt_solve, status_val, ltsresult&
@@ -751,7 +565,7 @@ CONTAINS
       writeoutputthisiteration = abs0 .LT. 1d-10
       dt_solve(1) = ltsresult(2)
       cfll = ltsresult(3)
-      IF (debug_heavy_io) PRINT*, 'adt', dt_solve(1)
+      PRINT*, 'adt', dt_solve(1)
       CALL LTSEULER(boundaryconditions, fluid, dt_solve)
 !#dt和CFL都是向量，列数为1，行数为cells	    	    		    
 ! CFLL*ones(size(dt)将标量CFLL扩展为与dt同维度的数组
@@ -760,19 +574,17 @@ CONTAINS
 !原julia和现在的Fortran：dt都是向量，CFL是标量
       CALL ADVANCESTATUS(status_val, dt_solve, cfll, timeintegrationfn, &
 &                  silent)
-      IF (debug_heavy_io) PRINT*, 'wh'
+      PRINT*, 'wh'
       IF (writeoutputthisiteration) status_val%nextoutputtime = &
 &         status_val%nextoutputtime + outputinterval
-      IF (debug_heavy_io) PRINT*, 'whh'
+      PRINT*, 'whh'
     END DO
 ! 简化后的输出：仅保留单元索引和流场数据!!!!!!!!!!!!!!!!!!!!
-    IF (debug_heavy_io) THEN
-      PRINT*, '=== 前100个单元的流场数据 ==='
-      PRINT*, '总单元数: ', ncells
-      PRINT*, '流场数据维度: ', SIZE(cellprimitives_sln, 1), '×', &
-&     SIZE(cellprimitives_sln, 2), '（行×列）'
-      PRINT*, '格式：单元索引 | P | T | Ux | Uy | Uz'
-    END IF
+    PRINT*, '=== 前100个单元的流场数据 ==='
+    PRINT*, '总单元数: ', ncells
+    PRINT*, '流场数据维度: ', SIZE(cellprimitives_sln, 1), '×', &
+&   SIZE(cellprimitives_sln, 2), '（行×列）'
+    PRINT*, '格式：单元索引 | P | T | Ux | Uy | Uz'
 ! 输出前100个单元的流场数据（仅整数和实数，避免格式冲突）
     DO i=1,15
 ! P（科学计数法，14位宽，6位小数）
@@ -780,7 +592,7 @@ CONTAINS
 ! Ux
 ! Uy
 ! Uz  ! U分量（实数）
-      IF (debug_heavy_io) WRITE(*, '(I5, 5ES14.6)') i, cellprimitives_sln(i, 1), &
+      WRITE(*, '(I5, 5ES14.6)') i, cellprimitives_sln(i, 1), &
 &     cellprimitives_sln(i, 2), cellprimitives_sln(i, 3), &
 &     cellprimitives_sln(i, 4), cellprimitives_sln(i, 5)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -2403,6 +2215,7 @@ CONTAINS
 ! 3. 提取压力并计算压力梯度（用于激波检测）
 !		allocate(P_eps(nCells))
 !		allocate(temp_grad(nCells, 1, 3))  ! 临时存储梯度（单元数×3方向×1变量）
+    PRINT*, 'hhh'
 !		allocate(gradP(nCells, 3))
 !		allocate(sj(nCells), sjCount(nCells))
 !		allocate(rj(nCells)) 
@@ -2443,6 +2256,7 @@ CONTAINS
     sjcount = 0.0_8
 ! 防止除零的小量
     epsilonn = 1.0d-10
+    PRINT*, 'ha'
     IF (ALLOCATED(sjd)) sjd = 0.0_8
 ! 只处理内部面（排除边界面）
     DO f=1,nfaces-nbdryfaces
@@ -2539,6 +2353,7 @@ CONTAINS
       sj(neighbourcell) = sj(neighbourcell) + temp*temp
       sjcount(neighbourcell) = sjcount(neighbourcell) + 1
     END DO
+    PRINT*, 'h'
     IF (ALLOCATED(rjd)) rjd = 0.0_8
 ! 5. 计算谱半径（rj）和平均激波传感器（sj）
 ! 谱半径 = 流速 + 声速
@@ -2583,11 +2398,12 @@ CONTAINS
         eps4d(f) = 0.0_8
         eps4(f) = 0.0_8
       END IF
+      ! PC 稳健 Jacobian：去掉四阶耗散并并入二阶（Hicken A1 思路）
       IF (pc_use_hicken_a1) THEN
         eps2d(f) = eps2d(f) + pc_hicken_sigma * eps4d(f)
-        eps2(f) = eps2(f) + pc_hicken_sigma * eps4(f)
+        eps2(f)  = eps2(f)  + pc_hicken_sigma * eps4(f)
         eps4d(f) = 0.0_8
-        eps4(f) = 0.0_8
+        eps4(f)  = 0.0_8
       END IF
     END DO
 ! 8. 输出结果：合并eps2和eps4为二维数组
@@ -2599,6 +2415,7 @@ CONTAINS
 ! 第2列=eps4
     epsd(:, 2) = eps4d
     eps(:, 2) = eps4
+    PRINT*, 'h'
 ! 9. 释放临时内存
 !		deallocate(P, P_matrix, temp_grad, gradP)
 !		deallocate(sj, sjCount, rj, rjsjF, eps2, eps4)
@@ -2607,6 +2424,7 @@ CONTAINS
 !!!!!!!!!!			
 ! 释放前检查数组是否已分配，避免释放未分配内存导致double free
 ! 先释放临时数组，再释放核心数组，避免依赖
+    PRINT*, 'hhh'
   END SUBROUTINE UNSTRUCTURED_JSTEPS_D
 
 ! 5.JST.jl!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -2669,6 +2487,7 @@ CONTAINS
 ! 3. 提取压力并计算压力梯度（用于激波检测）
 !		allocate(P_eps(nCells))
 !		allocate(temp_grad(nCells, 1, 3))  ! 临时存储梯度（单元数×3方向×1变量）
+    PRINT*, 'hhh'
 !		allocate(gradP(nCells, 3))
 !		allocate(sj(nCells), sjCount(nCells))
 !		allocate(rj(nCells)) 
@@ -2699,6 +2518,7 @@ CONTAINS
     sjcount = 0.0_8
 ! 防止除零的小量
     epsilonn = 1.0d-10
+    PRINT*, 'ha'
 ! 只处理内部面（排除边界面）
     DO f=1,nfaces-nbdryfaces
       ownercell = faces_mesh(f, 1)
@@ -2762,6 +2582,7 @@ CONTAINS
       sj(neighbourcell) = sj(neighbourcell) + (abs1/max2)**2
       sjcount(neighbourcell) = sjcount(neighbourcell) + 1
     END DO
+    PRINT*, 'h'
 ! 5. 计算谱半径（rj）和平均激波传感器（sj）
 ! 谱半径 = 流速 + 声速
     DO c=1,ncells
@@ -2794,6 +2615,7 @@ CONTAINS
     eps(:, 1) = eps2
 ! 第2列=eps4
     eps(:, 2) = eps4
+    PRINT*, 'h'
 ! 9. 释放临时内存
 !		deallocate(P, P_matrix, temp_grad, gradP)
 !		deallocate(sj, sjCount, rj, rjsjF, eps2, eps4)
@@ -2802,6 +2624,7 @@ CONTAINS
 !!!!!!!!!!			
 ! 释放前检查数组是否已分配，避免释放未分配内存导致double free
 ! 先释放临时数组，再释放核心数组，避免依赖
+    PRINT*, 'hhh'
   END SUBROUTINE UNSTRUCTURED_JSTEPS
 
 !  Differentiation of unstructured_jstflux in forward (tangent) mode (with options i4 dr8 r4):
@@ -2876,13 +2699,17 @@ CONTAINS
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !		allocate(fDGrads(nCells, nVars, DIM_SPACE))
+    PRINT*, 'AAA'
 ! 差值的梯度
     CALL GREENGAUSSGRADD_D(fdeltas, fdeltasd, .false., fdgrads, fdgradsd&
 &                   )
+	
+    PRINT*, 'BBB'
 !		allocate(eps22(nFaces), eps44(nFaces))
 !		allocate(eps(nFaces, 2), source=0.0_8)
 ! 二阶和四阶人工扩散系数
     CALL UNSTRUCTURED_JSTEPS_D(fluid, epss, epssd)
+    PRINT*, 'CCC'
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	
 ! 二阶耗散系数
@@ -2944,6 +2771,77 @@ CONTAINS
     CALL INTEGRATEFLUXES_UNSTRUCTURED3D_D()
 !		deallocate(fDeltas, fDGrads, eps22, eps44, diffusionFlux, unitFA, fD, farOwnerfD, farNeighbourfD)
   END SUBROUTINE UNSTRUCTURED_JSTFLUX_D
+  ! ---------- 预处理 / 近程序切线：中央与完整版一致；人工耗散切线削弱远端（2-level 链）----------
+!   (1) GREENGAUSSGRADD_D 后将 fdgradsd 清零：面差分梯度的切线不参与（去掉 d·∇ 外推对种子的远程耦合）。
+!   (2) 用 UNSTRUCTURED_JSTEPS 只更新 epss 原值，epssd、eps22d 置零：冻结 ε 对 W 的切线（类论文启动阶段）。
+  SUBROUTINE UNSTRUCTURED_JSTFLUXX_D(boundaryconditions, fluid)
+    IMPLICIT NONE
+    TYPE(BOUNDARYCONDITION), INTENT(IN) :: boundaryconditions(:)
+    TYPE(FLUIDD), INTENT(IN) :: fluid
+    REAL(kind=8) :: d(3), grad_v(3), dot_grad_v
+    INTEGER(kind=8) :: f, ownercell, neighbourcell, v, i1, i2, nfaces, &
+&   nboundaries, nbdryfaces, meshinfo(4), i, max_col
+    INTEGER(kind=8) :: print_eps, print_face, ncells, nvars
+    INTEGER(kind=8), PARAMETER :: dim_space=3
+    INTEGER(kind=8), PARAMETER :: n_eps_cols=2
+    INTRINSIC SIZE
+    INTRINSIC REAL
+    CALL UNSTRUCTUREDMESHINFO(meshinfo)
+    ncells = meshinfo(1)
+    nfaces = meshinfo(2)
+    nboundaries = meshinfo(3)
+    nbdryfaces = meshinfo(4)
+    nvars = SIZE(cellstate_sln, 2)
+    CALL UPDATEBOUNDARYCONDITIONS_D(boundaryconditions, nboundaries, &
+&                             fluid)
+    CALL LININTERP_3D_D(cellfluxes_sln, cellfluxes_slnd, facefluxes_sln&
+&                 , facefluxes_slnd)
+    CALL FACEDELTAS_D(fdeltas, fdeltasd)
+    PRINT*, 'AAA-JSTEPSS'
+    CALL GREENGAUSSGRADD_D(fdeltas, fdeltasd, .false., fdgrads, fdgradsd&
+&                   )
+	CALL PCDBG_CHECK_FACE_SPILL('AFTER_GREENGAUSS')
+	! ---- 冻结导数区域 ----
+    PRINT*, 'BBB-JSTEPSS'
+    IF (ALLOCATED(fdgradsd)) fdgradsd = 0.0_8
+    CALL UNSTRUCTURED_JSTEPS(fluid, epss)
+    CALL PCDBG_CHECK_FACE_SPILL('AFTER_JSTEPS_FLUX')
+    IF (ALLOCATED(epssd)) epssd = 0.0_8
+    IF (ALLOCATED(eps22d)) eps22d = 0.0_8
+    ! ---- 冻结导数区域 ----
+    eps22 = epss(:, 1)
+    eps44 = epss(:, 2)
+    CALL PCDBG_CHECK_FACE_SPILL('AFTER_FREEZE_EPS')
+    
+    PRINT*, 'CCC-JSTEPSS (short dissipation tangent)'
+    DO f=1,nfaces-nbdryfaces
+      ownercell = faces_mesh(f, 1)
+      neighbourcell = faces_mesh(f, 2)
+      d = ccenters_mesh(neighbourcell, :) - ccenters_mesh(ownercell, :)
+      fdd = fdeltasd(f, :)
+      fd = fdeltas(f, :)
+      DO v=1,nvars
+        grad_v = REAL(fdgrads(ownercell, v, :), kind=8)
+        CALL DOT_PRODUCT_REAL(d, grad_v, dot_grad_v, 3_8)
+        farownerfd(v) = fd(v) - dot_grad_v
+        farneighbourfd(v) = fd(v) + dot_grad_v
+      END DO
+      diffusionfluxd = fd*eps22d(f) + eps22(f)*fdd
+      diffusionflux = eps22(f)*fd
+      CALL NORMALIZE_D(favecs_mesh(f, :), favecs_meshd(f, :), unitfa, &
+&                unitfad)
+      DO v=1,nvars
+        i1 = (v-1)*3 + 1
+        i2 = i1 + 2
+        facefluxes_slnd(f, i1:i2) = facefluxes_slnd(f, i1:i2) - unitfa*&
+&         diffusionfluxd(v) - diffusionflux(v)*unitfad
+        facefluxes_sln(f, i1:i2) = facefluxes_sln(f, i1:i2) - &
+&         diffusionflux(v)*unitfa
+      END DO
+    END DO
+    CALL INTEGRATEFLUXES_UNSTRUCTURED3D_D()
+    CALL PCDBG_CHECK_RES_SPILL('AFTER_INTEGRATE')
+  END SUBROUTINE UNSTRUCTURED_JSTFLUXX_D
   SUBROUTINE UNSTRUCTURED_JSTFLUX_DD(boundaryconditions, &
 &   boundaryconditionsd, fluid)
     IMPLICIT NONE
@@ -2995,12 +2893,15 @@ CONTAINS
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !		allocate(fDGrads(nCells, nVars, DIM_SPACE))
+    PRINT*, 'AAA'
 ! 差值的梯度
     CALL GREENGAUSSGRADD(fdeltas, .false., fdgrads)
+    PRINT*, 'BBB'
 !		allocate(eps22(nFaces), eps44(nFaces))
 !		allocate(eps(nFaces, 2), source=0.0_8)
 ! 二阶和四阶人工扩散系数
     CALL UNSTRUCTURED_JSTEPS(fluid, epss)
+    PRINT*, 'CCC'
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	
 ! 二阶耗散系数
@@ -3119,12 +3020,15 @@ CONTAINS
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !		allocate(fDGrads(nCells, nVars, DIM_SPACE))
+    PRINT*, 'AAA'
 ! 差值的梯度
     CALL GREENGAUSSGRADD(fdeltas, .false., fdgrads)
+    PRINT*, 'BBB'
 !		allocate(eps22(nFaces), eps44(nFaces))
 !		allocate(eps(nFaces, 2), source=0.0_8)
 ! 二阶和四阶人工扩散系数
     CALL UNSTRUCTURED_JSTEPS(fluid, epss)
+    PRINT*, 'CCC'
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	
 ! 二阶耗散系数
@@ -3664,11 +3568,11 @@ CONTAINS
     INTRINSIC MAX
     INTRINSIC MIN
     REAL(kind=8), DIMENSION(3) :: abs0
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'b3'
 !		allocate(first5_refs(5,3))
 !		first5_refs = 0.0_8 !!!!!!!!!!
-    IF (debug_heavy_io) PRINT*, 'Reading mesh: ', polymeshpath
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'Reading mesh: ', polymeshpath
+    PRINT*, 'b3'
     npoints = SIZE(points_tempmesh, 1)
     nfaces = SIZE(owner_tempmesh)
     ncells = MAXVAL(owner_tempmesh)
@@ -3677,9 +3581,9 @@ CONTAINS
 !        allocate(fAVecs_mesh(nFaces, 3), mesh%fCenters(nFaces, 3))
 !        allocate(cellFaceCount(nCells))
 !        allocate(mesh%cells(nCells, max_faces_per_cell))
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'b3'
     cells_mesh = 0
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'b3'
     IF (ALLOCATED(faceptsd)) faceptsd = 0.0_8
     IF (ALLOCATED(favecs_meshd)) favecs_meshd = 0.0_8
     IF (ALLOCATED(fcenters_meshd)) fcenters_meshd = 0.0_8
@@ -3707,7 +3611,7 @@ CONTAINS
     END DO
 !        deallocate(facePts)
 !        deallocate(first5_refs)!!!!!!!!!!!!!
-    IF (debug_heavy_io) PRINT*, 'b4'
+    PRINT*, 'b4'
     cellfacecount = 0
     DO f=1,nfaces
       c = owner_tempmesh(f)
@@ -3727,7 +3631,7 @@ CONTAINS
 !       allocate(fCs(6, 3), cell_fAVecs(6, 3))
 !        allocate(cellPts(0, 3))
 !       allocate(cellPtss(1, 3))
-    IF (debug_heavy_io) PRINT*, 'b4'
+    PRINT*, 'b4'
     IF (ALLOCATED(fcsd)) fcsd = 0.0_8
     IF (ALLOCATED(ccenters_meshd)) ccenters_meshd = 0.0_8
     IF (ALLOCATED(cell_favecsd)) cell_favecsd = 0.0_8
@@ -3789,7 +3693,7 @@ CONTAINS
       END DO
 ! 新增：结束前5个单元的判
 ! 仅对前5个单元输出输入变量的前5行
-      IF (debug_heavy_io .AND. c .LE. 5) THEN
+      IF (c .LE. 5) THEN
 ! 新增：限制仅前5个单元执行以下输出
 ! 1. 输出输入变量cellPtss（当前单元的前5行顶点坐标）
         PRINT*, '调用cellVolCentroid前 - 单元', c, &
@@ -3825,7 +3729,7 @@ CONTAINS
 &                      ccenters_meshd(c, :))
 ! 新增：结束前5个单元的判断
 ! 4. 输出输出变量mesh%cVols(c)（仅前5个单元）
-      IF (debug_heavy_io .AND. c .LE. 5) THEN
+      IF (c .LE. 5) THEN
 ! 新增：仅前5个单元输出
         PRINT*, &
 &       '调用cellVolCentroid后 - 输出mesh%cVols(c)（单元', c, &
@@ -3834,7 +3738,7 @@ CONTAINS
       END IF
 ! 新增：结束前5个单元的判断
 ! 5. 输出输出变量mesh%cCenters(c,:)（仅前5个单元）
-      IF (debug_heavy_io .AND. c .LE. 5) THEN
+      IF (c .LE. 5) THEN
 ! 新增：仅前5个单元输出
         PRINT*, &
 &       '调用cellVolCentroid后 - 输出mesh%cCenters(c,:)（单元', &
@@ -3919,11 +3823,11 @@ CONTAINS
     INTRINSIC MAX
     INTRINSIC MIN
     REAL(kind=8), DIMENSION(3) :: abs0
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'b3'
 !		allocate(first5_refs(5,3))
 !		first5_refs = 0.0_8 !!!!!!!!!!
-    IF (debug_heavy_io) PRINT*, 'Reading mesh: ', polymeshpath
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'Reading mesh: ', polymeshpath
+    PRINT*, 'b3'
     npoints = SIZE(points_tempmesh, 1)
     nfaces = SIZE(owner_tempmesh)
     ncells = MAXVAL(owner_tempmesh)
@@ -3932,9 +3836,9 @@ CONTAINS
 !        allocate(fAVecs_mesh(nFaces, 3), mesh%fCenters(nFaces, 3))
 !        allocate(cellFaceCount(nCells))
 !        allocate(mesh%cells(nCells, max_faces_per_cell))
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'b3'
     cells_mesh = 0
-    IF (debug_heavy_io) PRINT*, 'b3'
+    PRINT*, 'b3'
 !        allocate(mesh%cVols(nCells), mesh%cCenters(nCells, 3), mesh%cellSizes(nCells, 3))
 ! 计算每个面的面积向量和几何中心
 !        allocate(facePts(size(tempMesh%faces%faces(1)%points), 3))
@@ -3957,7 +3861,7 @@ CONTAINS
     END DO
 !        deallocate(facePts)
 !        deallocate(first5_refs)!!!!!!!!!!!!!
-    IF (debug_heavy_io) PRINT*, 'b4'
+    PRINT*, 'b4'
     cellfacecount = 0
     DO f=1,nfaces
       c = owner_tempmesh(f)
@@ -3977,7 +3881,7 @@ CONTAINS
 !       allocate(fCs(6, 3), cell_fAVecs(6, 3))
 !        allocate(cellPts(0, 3))
 !       allocate(cellPtss(1, 3))
-    IF (debug_heavy_io) PRINT*, 'b4'
+    PRINT*, 'b4'
 !遍历网格中的每一个单元（cell），收集该单元所有面的所有顶点坐标，去除重复的顶点，最终得\E5
 !\88\B0每个单元的唯一顶点集合。
     DO c=1,ncells
@@ -4032,7 +3936,7 @@ CONTAINS
       END DO
 ! 新增：结束前5个单元的判
 ! 仅对前5个单元输出输入变量的前5行
-      IF (debug_heavy_io .AND. c .LE. 5) THEN
+      IF (c .LE. 5) THEN
 ! 新增：限制仅前5个单元执行以下输出
 ! 1. 输出输入变量cellPtss（当前单元的前5行顶点坐标）
         PRINT*, '调用cellVolCentroid前 - 单元', c, &
@@ -4066,7 +3970,7 @@ CONTAINS
 &                    ccenters_mesh(c, :))
 ! 新增：结束前5个单元的判断
 ! 4. 输出输出变量mesh%cVols(c)（仅前5个单元）
-      IF (debug_heavy_io .AND. c .LE. 5) THEN
+      IF (c .LE. 5) THEN
 ! 新增：仅前5个单元输出
         PRINT*, &
 &       '调用cellVolCentroid后 - 输出mesh%cVols(c)（单元', c, &
@@ -4075,7 +3979,7 @@ CONTAINS
       END IF
 ! 新增：结束前5个单元的判断
 ! 5. 输出输出变量mesh%cCenters(c,:)（仅前5个单元）
-      IF (debug_heavy_io .AND. c .LE. 5) THEN
+      IF (c .LE. 5) THEN
 ! 新增：仅前5个单元输出
         PRINT*, &
 &       '调用cellVolCentroid后 - 输出mesh%cCenters(c,:)（单元', &
@@ -4872,7 +4776,7 @@ CONTAINS
 ! 显式定义int64为8字节整数（等价于kind=8）        
     INTEGER(kind=8), PARAMETER :: int64=8
     CHARACTER(len=*), INTENT(IN) :: filepath
-    INTEGER(kind=8), ALLOCATABLE :: facepoints(:, :)
+    INTEGER(kind=8) :: facepoints(74151, 4)
 !        type(FaceType), allocatable :: tmp_faces(:)
 !        character(len=1000), allocatable :: lines_Faces(:)
     INTEGER(kind=8) :: startline, fcount, i, nlines, iostat, file_unit, &
@@ -4882,9 +4786,8 @@ CONTAINS
     INTEGER(kind=8) :: pt_count
     INTRINSIC TRIM
     INTRINSIC INDEX
-    INTRINSIC ALLOCATED
 !        integer(kind=8), allocatable :: pts_Faces(:)  
-    IF (debug_heavy_io) PRINT*, 'A'
+    PRINT*, 'A'
     file_unit = GET_FREE_UNIT()
     OPEN(unit=file_unit, file=filepath, status='old', action='read', &
 &  iostat=iostat) 
@@ -4899,36 +4802,26 @@ CONTAINS
         END DO
         CLOSE(file_unit) 
         CALL OFFILE_FINDNITEMS(lines_faces, startline, fcount)
-        IF (fcount .LE. 0) THEN
-          ALLOCATE(facepoints(0, 4))
-          RETURN
-        END IF
-        ALLOCATE(facepoints(fcount, 4), source=0_int64)
-        IF (.NOT.ALLOCATED(pts_faces)) ALLOCATE(pts_faces(4), source=0_int64)
 !        allocate(tmp_faces(fCount))
 ! 循环外一次性分配
 !		allocate(pts_Faces(max_pt_count), source=0_int64)
 !		allocate(facePoints(fCount, 4)) 
 ! 解析面数据
-        IF (debug_heavy_io) PRINT*, 'A'
+        PRINT*, 'A'
         DO i=1,fcount
           line = TRIM(lines_faces(startline+i-1))
           bracketl = INDEX(line, '(')
           bracketr = INDEX(line, ')')
           READ(line(1:bracketl-1), *) pt_count
-          IF (pt_count .NE. 4) THEN
-            PRINT*, 'Error: non-quad face in file: ', TRIM(filepath)
-            STOP
-          END IF
 ! 读取括号内的点索引
-          READ(line(bracketl+1:bracketr-1), *) pts_faces(1:pt_count)
+          READ(line(bracketl+1:bracketr-1), *) pts_faces
 ! 0基转1基
-          pts_faces(1:pt_count) = pts_faces(1:pt_count) + 1
+          pts_faces = pts_faces + 1
 ! 给面结构分配空间并赋值
 !			allocate(tmp_faces(i)%points(pt_count))
-          facepoints(i, 1:pt_count) = pts_faces(1:pt_count)
+          facepoints(i, :) = pts_faces
         END DO
-        IF (debug_heavy_io) PRINT*, 'A'
+        PRINT*, 'A'
 !		deallocate(pts_Faces)
 !        deallocate(lines_Faces, tmp_faces)
         GOTO 100
@@ -5082,10 +4975,8 @@ CONTAINS
 &   , boundarystartfacess(:)
     INTEGER(kind=8) :: i, nlines, iostat, startline, bcount, file_unit
     INTEGER(kind=8) :: bnameline, bnfacesline, bstartfaceline, pos
-    INTEGER(kind=8) :: parsed_i8
 !        character(len=256), allocatable :: bLines(:)
     CHARACTER(len=256) :: linestr, dummy
-    LOGICAL :: parse_ok
     INTRINSIC ADJUSTL
     INTRINSIC TRIM
     INTRINSIC INDEX
@@ -5096,7 +4987,7 @@ CONTAINS
 !            allocate(boundaryNames(0), boundaryNumFacess(0), boundaryStartFacess(0))
 !            return
 !        end if
-    IF (debug_heavy_io) PRINT*, 'A0'
+    PRINT*, 'A0'
     nlines = 0
     DO 
       READ(file_unit, '(a)', iostat=iostat) 
@@ -5116,28 +5007,18 @@ CONTAINS
         ALLOCATE(boundarynumfacess(bcount))
         ALLOCATE(boundarystartfacess(bcount))
         ALLOCATE(boundarynames(bcount))
-        IF (debug_heavy_io) PRINT*, 'A0'
+        PRINT*, 'A0'
         DO i=1,bcount
           bnameline = FINDINLINES('{', blines, startline) - 1
           boundarynames(i) = TRIM(ADJUSTL(blines(bnameline)))
           bnfacesline = FINDINLINES('nFaces', blines, startline)
           pos = INDEX(blines(bnfacesline), 'nFaces') + 6
-          IF (debug_heavy_io) PRINT*, 'A1'
-          CALL PARSE_FIRST_INT(blines(bnfacesline)(pos:), parsed_i8, parse_ok)
-          IF (parse_ok) THEN
-            boundarynumfacess(i) = parsed_i8
-          ELSE
-            boundarynumfacess(i) = 0_8
-          END IF
-          IF (debug_heavy_io) PRINT*, 'A2'
+          PRINT*, 'A1'
+          READ(blines(bnfacesline)(pos:), *) boundarynumfacess(i)
+          PRINT*, 'A2'
           bstartfaceline = FINDINLINES('startFace', blines, startline)
           pos = INDEX(blines(bstartfaceline), 'startFace') + 9
-          CALL PARSE_FIRST_INT(blines(bstartfaceline)(pos:), parsed_i8, parse_ok)
-          IF (parse_ok) THEN
-            boundarystartfacess(i) = parsed_i8
-          ELSE
-            boundarystartfacess(i) = 0_8
-          END IF
+          READ(blines(bstartfaceline), *) dummy, boundarystartfacess(i)
           boundarystartfacess(i) = boundarystartfacess(i) + 1
 !boundaryEndFaces(i) = boundaryStartFacess(i) + boundaryNumFacess(i) - 1
           startline = FINDINLINES('}', blines, startline) + 1
@@ -5211,50 +5092,6 @@ CONTAINS
     READ(str, *, iostat=iostat) num
     IF (iostat .EQ. 0) isnumber = .true.
   END FUNCTION ISNUMBER
-
-  SUBROUTINE PARSE_FIRST_INT(str, ival, ok)
-    IMPLICIT NONE
-    CHARACTER(len=*), INTENT(IN) :: str
-    INTEGER(kind=8), INTENT(OUT) :: ival
-    LOGICAL, INTENT(OUT) :: ok
-    CHARACTER(len=:), ALLOCATABLE :: s
-    INTEGER(kind=8) :: i, j, n, ios
-    INTEGER(kind=8) :: signv
-    CHARACTER(len=64) :: token
-
-    s = ADJUSTL(str)
-    n = LEN_TRIM(s)
-    i = 1_8
-    ok = .FALSE.
-    ival = 0_8
-
-    DO WHILE (i <= n)
-      IF (s(i:i) == '-' .OR. (s(i:i) >= '0' .AND. s(i:i) <= '9')) EXIT
-      i = i + 1_8
-    END DO
-    IF (i > n) RETURN
-
-    signv = 1_8
-    IF (s(i:i) == '-') THEN
-      signv = -1_8
-      i = i + 1_8
-      IF (i > n) RETURN
-    END IF
-
-    IF (.NOT.(s(i:i) >= '0' .AND. s(i:i) <= '9')) RETURN
-    j = i
-    DO WHILE (j <= n)
-      IF (.NOT.(s(j:j) >= '0' .AND. s(j:j) <= '9')) EXIT
-      j = j + 1_8
-    END DO
-
-    token = ' '
-    token(1:(j-i)) = s(i:j-1_8)
-    READ(token(1:(j-i)), *, iostat=ios) ival
-    IF (ios /= 0) RETURN
-    ival = signv * ival
-    ok = .TRUE.
-  END SUBROUTINE PARSE_FIRST_INT
 
 ! 辅助函数：查找包含子串的行
   INTEGER(kind=8) FUNCTION FINDINLINES(substr, lines, startline)
@@ -5750,7 +5587,7 @@ CONTAINS
         totaldistd = c1distd + c2distd
         totaldist = c1dist + c2dist
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!        
-!        IF (debug_heavy_io .AND. f .LE. 3) THEN
+!        IF (f .LE. 3) THEN
 !          PRINT*, '===== Face/Cell No.', f, ' ====='
 !			  PRINT*, 'c1distd   : ', c1distd
 !          PRINT*, 'c1dist    : ', c1dist
@@ -5824,7 +5661,7 @@ CONTAINS
 ! 总距离
         totaldist = c1dist + c2dist
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!        
-        IF (debug_heavy_io .AND. f .LE. 3) THEN
+        IF (f .LE. 3) THEN
           PRINT*, '===== Face/Cell No.', f, ' ====='
 !			  PRINT*, 'c1distd   : ', c1distd
           PRINT*, 'c1dist    : ', c1dist
@@ -5903,7 +5740,7 @@ CONTAINS
 ! 总距离
         totaldist = c1dist + c2dist
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!        
-        IF (debug_heavy_io .AND. f .LE. 3) THEN
+        IF (f .LE. 3) THEN
           PRINT*, '===== Face/Cell No.', f, ' ====='
 !			  PRINT*, 'c1distd   : ', c1distd
           PRINT*, 'c1dist    : ', c1dist
@@ -6321,17 +6158,15 @@ CONTAINS
     nbdryfaces = meshinfo(4)
     nvars = SIZE(cellstate_sln, 2)
 ! 输出前5个mesh.fAVecs和mesh.cVols
-    IF (debug_heavy_io) THEN
-      WRITE(*, *) 'First 5 mesh.fAVecs:'
-      DO f=1,5
-        WRITE(*, '(A,I3,A,3(E12.6,1X))') 'Face ', f, ': ', favecs_mesh(f, &
-&       1), favecs_mesh(f, 2), favecs_mesh(f, 3)
-      END DO
-      WRITE(*, *) 'First 5 mesh.cVols:'
-      DO f=1,5
-        WRITE(*, '(A,I3,A,E12.6)') 'Cell ', f, ': ', cvols_mesh(f)
-      END DO
-    END IF
+    WRITE(*, *) 'First 5 mesh.fAVecs:'
+    DO f=1,5
+      WRITE(*, '(A,I3,A,3(E12.6,1X))') 'Face ', f, ': ', favecs_mesh(f, &
+&     1), favecs_mesh(f, 2), favecs_mesh(f, 3)
+    END DO
+    WRITE(*, *) 'First 5 mesh.cVols:'
+    DO f=1,5
+      WRITE(*, '(A,I3,A,E12.6)') 'Cell ', f, ': ', cvols_mesh(f)
+    END DO
 ! ======================================================================
 ! 输出前5个 meshd%favecs		
 !		WRITE(*, *) NEW_LINE('a')//'First 5 meshd%fAVecs (differential):'
@@ -6440,17 +6275,15 @@ CONTAINS
     nbdryfaces = meshinfo(4)
     nvars = SIZE(cellstate_sln, 2)
 ! 输出前5个mesh.fAVecs和mesh.cVols
-    IF (debug_heavy_io) THEN
-      WRITE(*, *) 'First 5 mesh.fAVecs:'
-      DO f=1,5
-        WRITE(*, '(A,I3,A,3(E12.6,1X))') 'Face ', f, ': ', favecs_mesh(f, &
-&       1), favecs_mesh(f, 2), favecs_mesh(f, 3)
-      END DO
-      WRITE(*, *) 'First 5 mesh.cVols:'
-      DO f=1,5
-        WRITE(*, '(A,I3,A,E12.6)') 'Cell ', f, ': ', cvols_mesh(f)
-      END DO
-    END IF
+    WRITE(*, *) 'First 5 mesh.fAVecs:'
+    DO f=1,5
+      WRITE(*, '(A,I3,A,3(E12.6,1X))') 'Face ', f, ': ', favecs_mesh(f, &
+&     1), favecs_mesh(f, 2), favecs_mesh(f, 3)
+    END DO
+    WRITE(*, *) 'First 5 mesh.cVols:'
+    DO f=1,5
+      WRITE(*, '(A,I3,A,E12.6)') 'Cell ', f, ': ', cvols_mesh(f)
+    END DO
 ! ======================================================================
 ! 输出前5个 meshd%favecs		
 !		WRITE(*, *) NEW_LINE('a')//'First 5 meshd%fAVecs (differential):'
@@ -6489,7 +6322,7 @@ CONTAINS
         CALL DOT_PRODUCT_REAL(facefluxes_sln(f, i1:i2), favecs_mesh(f, :&
 &                       ), flow, 3_8)
 ! 添加输出 - 只输出前10个面的flow值
-        IF (debug_heavy_io .AND. f .LE. 10) WRITE(*, '(A,I3,A,I3,A,E12.5)') 'Face ', f, &
+        IF (f .LE. 10) WRITE(*, '(A,I3,A,I3,A,E12.5)') 'Face ', f, &
 &                      ' Var ', v, ' Flow = ', flow
         fluxresiduals_sln(ownercell, v) = fluxresiduals_sln(ownercell, v&
 &         ) - flow
@@ -6503,13 +6336,11 @@ CONTAINS
     END DO
 ! 确保不超过数组大小
     maxoutput = 15
-    IF (debug_heavy_io) THEN
-      WRITE(*, *) '3D:Flux residuals for first 15 cells:'
-      DO i=1,maxoutput
-        WRITE(*, '(A,I3,A,*(E12.6,1X))') 'Cell ', i, ': ', (&
-&       fluxresiduals_sln(i, j), j=1,nvars)
-      END DO
-    END IF
+    WRITE(*, *) '3D:Flux residuals for first 15 cells:'
+    DO i=1,maxoutput
+      WRITE(*, '(A,I3,A,*(E12.6,1X))') 'Cell ', i, ': ', (&
+&     fluxresiduals_sln(i, j), j=1,nvars)
+    END DO
 ! 5. 除以单元格体积（单位体积残差）
     DO v=1,nvars
 ! f 实际是单元索引（建议重命名为 c 更清晰）
@@ -7101,10 +6932,10 @@ CONTAINS
 !		do i = 1, maxOutput
 !		  write(*, '(A,I3,A,*(E12.6,1X))') "Cell ", i, ": ", (fluxResiduals(i,j), j=1,nVars)
 !		end do
-    IF (debug_heavy_io) PRINT*, 'www'
+    PRINT*, 'www'
 ! 计算时间步长
     CALL CFL(ncells, fluid, 1.0_8, dt)
-    IF (debug_heavy_io) PRINT*, 'www'
+    PRINT*, 'www'
 ! 输出前5个dt值
 !		write(*,*) "First 5 dt values:"
 !		do i = 1, 5
@@ -7116,9 +6947,9 @@ CONTAINS
 !		do i = 1, 5
 !		    write(*,'(A,I3,A,E12.6)') "dt(", i, ") = ", dt(i)
 !		end do
-    IF (debug_heavy_io) PRINT*, 'AAz'
+    PRINT*, 'AAz'
     CALL SMOOTHTIMESTEP(dt, 0.1_8, dt_val)
-    IF (debug_heavy_io) PRINT*, 'AAz'
+    PRINT*, 'AAz'
 ! 输出前5个dt值
 !		write(*,*) "First 5 dt values:"
 !		do i = 1, 5
@@ -7135,18 +6966,16 @@ CONTAINS
       END DO
     END DO
 ! 输出前6个cellState
-    IF (debug_heavy_io) THEN
-      WRITE(*, *) 'First 6 cellState values:'
-      DO i=1,6
-        WRITE(*, '(A,I3,A,*(E12.6,1X))') 'Cell ', i, ': ', (cellstate_sln(&
-&       i, j), j=1,SIZE(cellstate_sln, 2))
-      END DO
-    END IF
-    IF (debug_heavy_io) PRINT*, 'www'
+    WRITE(*, *) 'First 6 cellState values:'
+    DO i=1,6
+      WRITE(*, '(A,I3,A,*(E12.6,1X))') 'Cell ', i, ': ', (cellstate_sln(&
+&     i, j), j=1,SIZE(cellstate_sln, 2))
+    END DO
+    PRINT*, 'www'
     CALL DECODESOLUTION_3D(fluid)
 ! 释放临时数组（可选，避免内存泄漏）
 !    	deallocate(fluxResiduals, dt_val)
-    IF (debug_heavy_io) PRINT*, 'www'
+    PRINT*, 'www'
   END SUBROUTINE LTSEULER
 
 ! 时间步长平滑函数（用于局部时间步长方法）.局部时间步长在空间上可能剧烈变化，导致相邻单
@@ -7661,7 +7490,7 @@ CONTAINS
     TYPE(FLUIDD) :: fluid
 !		type(Meshh), allocatable :: mesh
 !		real*8, allocatable, intent(in) :: point_update(:,:) ! 输入：变形网格点
-    REAL(kind=8), ALLOCATABLE :: cellprimitives(:, :)
+    REAL(kind=8) :: cellprimitives(18513, 5)
 !		type(SolutionState), allocatable, intent(inout) :: sln
     REAL(kind=8), ALLOCATABLE, INTENT(INOUT) :: cellprimitivess(:, :)
 !		real(kind=8), intent(inout) :: cellPrimitivess_1
@@ -7730,7 +7559,7 @@ CONTAINS
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
 ! 读取网格
-    meshpath = TRIM(mesh_path_runtime)
+    meshpath = 'mesh/OFairfoilMesh'
 !!!!!!!!!!!	   
 !		allocate(tempMesh%owner(0), neighbour_tempMesh(0))		    
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
@@ -7739,23 +7568,19 @@ CONTAINS
     nboundaries = SIZE(tempmesh%boundarynames)
 !        allocate(first5_refs(5,3))		  
 !call OpenFOAMMesh(meshPath, point_update, mesh)
-    IF (debug_heavy_io) PRINT*, 'abc'
+    PRINT*, 'abc'
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
-    IF (debug_heavy_io) PRINT*, 'abc'
+    PRINT*, 'abc'
 !        deallocate(first5_refs)
     CALL DEALLOCATEMESHDATA(tempmesh)
 !!!!!!!!!!!!!!!!!!!!!!		                 
-    IF (debug_heavy_io) THEN
-      WRITE(*, *) 'test_First 5 mesh.cVols:'
-      DO f=1,5
-        WRITE(*, '(A,I3,A,E12.6)') 'Cell ', f, ': ', cvols_mesh(f)
-      END DO
-    END IF
+    WRITE(*, *) 'test_First 5 mesh.cVols:'
+    DO f=1,5
+      WRITE(*, '(A,I3,A,E12.6)') 'Cell ', f, ': ', cvols_mesh(f)
+    END DO
 ! 修改后的代码
     CALL UNSTRUCTUREDMESHINFO(meshinfo)
     ncells = meshinfo(1)
-    IF (ALLOCATED(cellprimitives)) DEALLOCATE(cellprimitives)
-    ALLOCATE(cellprimitives(ncells, 5))
 !		allocate(cellPrimitives(nCells, 5)) 
 ! 初始化均匀解
     PRINT*, 'a1'
@@ -7873,7 +7698,7 @@ CONTAINS
     boundaryconditions(4)%type = outletboundary
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = TRIM(mesh_path_runtime)
+    meshpath = 'mesh/OFairfoilMesh'
     IF (.NOT. buf_jst_mesh_geometry_cached) THEN
       CALL READOPENFOAMMESH_D(meshpath, point_update, point_updated, tempmesh)
       CALL OPENFOAMMESH_D(meshpath, point_update, tempmesh)
@@ -7897,17 +7722,102 @@ CONTAINS
     facefluxes_sln = 0.0_8
     CALL DECODESOLUTION_3D_D(fluid)
 !		allocate(fluxResidualss(nCells, 5), source=0.0_8)
-    CALL UNSTRUCTURED_JSTFLUX_D(boundaryconditions, fluid)
-    IF (residual_in_primitive_space) THEN
-      ! 统一到原始变量残差空间：Rw=(dw/du)Ru；导数项同样左乘。
-      ! 严格一致：dRw = (dw/du)dRu + d(dw/du)Ru
-      CALL MAP_RESIDUALS_TO_PRIMITIVE_SPACE(cellprimitives, .TRUE., cellprimitivesd)
-      IF (residual_mapping_fd_check .AND. (.NOT. residual_mapping_fd_checked)) THEN
-        CALL VERIFY_RESIDUAL_MAPPING_FD(data_4d137, cellprimitives, cellprimitivesd)
-        residual_mapping_fd_checked = .TRUE.
-      END IF
+    IF (use_jstepss_for_steady_residual_d) THEN
+      CALL UNSTRUCTURED_JSTFLUXX_D(boundaryconditions, fluid)
+    ELSE
+      CALL UNSTRUCTURED_JSTFLUX_D(boundaryconditions, fluid)
     END IF
   END SUBROUTINE COMPUTE_STEADY_RESIDUAL_D
+  SUBROUTINE SET_USE_JSTEPSS_FOR_RESIDUAL_D(short)
+    IMPLICIT NONE
+    LOGICAL, INTENT(IN) :: short
+    use_jstepss_for_steady_residual_d = short
+  END SUBROUTINE SET_USE_JSTEPSS_FOR_RESIDUAL_D
+
+  SUBROUTINE SET_PC_HICKEN_A1(enable, sigma)
+    IMPLICIT NONE
+    LOGICAL, INTENT(IN) :: enable
+    REAL(kind=8), INTENT(IN), OPTIONAL :: sigma
+    pc_use_hicken_a1 = enable
+    IF (PRESENT(sigma)) pc_hicken_sigma = sigma
+  END SUBROUTINE SET_PC_HICKEN_A1
+
+  SUBROUTINE SET_PC_TZINGER(use_in_pc, use_in_krylov, gamma, dt_floor, reset_dt_ref)
+    IMPLICIT NONE
+    LOGICAL, INTENT(IN), OPTIONAL :: use_in_pc, use_in_krylov, reset_dt_ref
+    REAL(kind=8), INTENT(IN), OPTIONAL :: gamma, dt_floor
+    IF (PRESENT(use_in_pc)) pc_tzinger_in_pc = use_in_pc
+    IF (PRESENT(use_in_krylov)) pc_tzinger_in_krylov = use_in_krylov
+    IF (PRESENT(gamma)) pc_tzinger_gamma = gamma
+    IF (PRESENT(dt_floor)) pc_tzinger_dt_floor = dt_floor
+    IF (PRESENT(reset_dt_ref)) THEN
+      IF (reset_dt_ref) pc_tzinger_dt_ref = 0.0_8
+    END IF
+  END SUBROUTINE SET_PC_TZINGER
+
+  SUBROUTINE SET_PC_ROBUST(use_rcm, ilu_stab, ilu_retry_rel, print_jac5x5, stab_ainfn_cap, stab_abs_cap, &
+&   tz_dt_ref_cap, tz_eta_scale)
+    IMPLICIT NONE
+    LOGICAL, INTENT(IN), OPTIONAL :: use_rcm, print_jac5x5
+    REAL(kind=8), INTENT(IN), OPTIONAL :: ilu_stab, ilu_retry_rel, stab_ainfn_cap, stab_abs_cap, &
+&     tz_dt_ref_cap, tz_eta_scale
+    IF (PRESENT(use_rcm)) pc_use_rcm = use_rcm
+    IF (PRESENT(ilu_stab)) pc_ilu_diag_stab = ilu_stab
+    IF (PRESENT(ilu_retry_rel)) pc_ilu_retry_diag = ilu_retry_rel
+    IF (PRESENT(print_jac5x5)) pc_print_jac5x5 = print_jac5x5
+    IF (PRESENT(stab_ainfn_cap)) pc_ilu_stab_ainfn_cap = stab_ainfn_cap
+    IF (PRESENT(stab_abs_cap)) pc_ilu_stab_abs_cap = stab_abs_cap
+    IF (PRESENT(tz_dt_ref_cap)) pc_tzinger_dt_ref_cap = tz_dt_ref_cap
+    IF (PRESENT(tz_eta_scale)) pc_tzinger_eta_scale = tz_eta_scale
+  END SUBROUTINE SET_PC_ROBUST
+
+  SUBROUTINE COMPUTE_PC_TZINGER_T(n)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: n
+    INTEGER(kind=8) :: ncells, c, k, ii
+    REAL(kind=8) :: eta_d, dt_try, vol_sum, volc, vol_ref, dt_c
+    INTRINSIC SIZE, SUM, SQRT, REAL, MAX, ALLOCATED
+    IF (.NOT. pc_tzinger_in_pc .AND. .NOT. pc_tzinger_in_krylov) RETURN
+    IF (n <= 0_8) RETURN
+    ncells = n/5_8
+    IF (ncells*5_8 /= n) RETURN
+    IF (.NOT. ALLOCATED(pc_tzinger_T)) ALLOCATE(pc_tzinger_T(n))
+    eta_d = 0.0_8
+    IF (ALLOCATED(fluxresiduals_sln)) THEN
+      IF (SIZE(fluxresiduals_sln, 1) >= ncells .AND. SIZE(fluxresiduals_sln, 2) >= 5_8) THEN
+	eta_d = SQRT(SUM(fluxresiduals_sln(1:ncells, 1:5)**2))
+      END IF
+    END IF
+    eta_d = eta_d * pc_tzinger_eta_scale
+    ! 文 inexact-Newton：Δt_ref = max(γ η_d, Δt_ref^{n-1})，γ=2（式(670)附近）
+    dt_try = MAX(pc_tzinger_gamma*eta_d, pc_tzinger_dt_floor)
+    pc_tzinger_dt_ref = MAX(dt_try, pc_tzinger_dt_ref)
+    IF (pc_tzinger_dt_ref_cap > 0.0_8) pc_tzinger_dt_ref = MIN(pc_tzinger_dt_ref, pc_tzinger_dt_ref_cap)
+    vol_sum = 0.0_8
+    IF (ALLOCATED(cVols_mesh)) THEN
+      IF (SIZE(cVols_mesh) >= ncells) vol_sum = SUM(cVols_mesh(1:ncells))
+    END IF
+    IF (vol_sum > 0.0_8) THEN
+      vol_ref = vol_sum/REAL(ncells, 8)
+    ELSE
+      vol_ref = 1.0_8
+    END IF
+    DO c = 1_8, ncells
+      IF (vol_sum > 0.0_8 .AND. ALLOCATED(cVols_mesh) .AND. SIZE(cVols_mesh) >= ncells) THEN
+	volc = MAX(cVols_mesh(c), 1.0d-30)
+	dt_c = pc_tzinger_dt_ref*(vol_ref/volc)**(1.0_8/3.0_8)
+      ELSE
+	dt_c = pc_tzinger_dt_ref
+      END IF
+      dt_c = MAX(dt_c, pc_tzinger_dt_floor)
+      DO k = 1_8, 5_8
+	ii = (c - 1_8)*5_8 + k
+	pc_tzinger_T(ii) = 1.0_8/dt_c
+      END DO
+    END DO
+    PRINT *, '[PC-TZINGER] dt_ref=', pc_tzinger_dt_ref, ' eta_used=', eta_d, ' eta_scale=', pc_tzinger_eta_scale, &
+      ' dt_ref_cap=', pc_tzinger_dt_ref_cap, ' in_pc=', pc_tzinger_in_pc, ' in_krylov=', pc_tzinger_in_krylov
+  END SUBROUTINE COMPUTE_PC_TZINGER_T
 
   SUBROUTINE COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitives)
     IMPLICIT NONE
@@ -7947,7 +7857,7 @@ CONTAINS
     boundaryconditions(4)%type = outletboundary
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = TRIM(mesh_path_runtime)
+    meshpath = 'mesh/OFairfoilMesh'
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL DEALLOCATEMESHDATA(tempmesh)
@@ -7962,149 +7872,7 @@ CONTAINS
     CALL DECODESOLUTION_3D(fluid)
 !		allocate(fluxResidualss(nCells, 5), source=0.0_8)
     CALL UNSTRUCTURED_JSTFLUX(boundaryconditions, fluid)
-    IF (residual_in_primitive_space) THEN
-      CALL MAP_RESIDUALS_TO_PRIMITIVE_SPACE(cellprimitives, .FALSE.)
-    END IF
   END SUBROUTINE COMPUTE_STEADY_RESIDUAL
-
-  SUBROUTINE BUILD_DUDW_DOT_5X5(wp, wpd, fluid, Jdot)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: wp(5), wpd(5)
-    TYPE(FLUIDD), INTENT(IN) :: fluid
-    REAL(kind=8), INTENT(OUT) :: Jdot(5,5)
-    REAL(kind=8) :: P, T, Ux, Uy, Uz, dP, dT, dUx, dUy, dUz
-    REAL(kind=8) :: rho, drho_dP, drho_dT, drho, ddrho_dP, ddrho_dT
-    REAL(kind=8) :: Cv, E, dE
-    P = wp(1); T = wp(2); Ux = wp(3); Uy = wp(4); Uz = wp(5)
-    dP = wpd(1); dT = wpd(2); dUx = wpd(3); dUy = wpd(4); dUz = wpd(5)
-    Cv = fluid%cp - fluid%r
-    rho = P / (fluid%r * T)
-    drho_dP = 1.0_8 / (fluid%r * T)
-    drho_dT = -P / (fluid%r * T * T)
-    drho = drho_dP * dP + drho_dT * dT
-    ddrho_dP = -(1.0_8 / (fluid%r * T * T)) * dT
-    ddrho_dT = -(1.0_8 / (fluid%r * T * T)) * dP + (2.0_8 * P / (fluid%r * T * T * T)) * dT
-    E = Cv*T + 0.5_8*(Ux*Ux + Uy*Uy + Uz*Uz)
-    dE = Cv*dT + Ux*dUx + Uy*dUy + Uz*dUz
-    Jdot = 0.0_8
-    Jdot(1,1) = ddrho_dP
-    Jdot(1,2) = ddrho_dT
-    Jdot(2,1) = dUx*drho_dP + Ux*ddrho_dP
-    Jdot(2,2) = dUx*drho_dT + Ux*ddrho_dT
-    Jdot(2,3) = drho
-    Jdot(3,1) = dUy*drho_dP + Uy*ddrho_dP
-    Jdot(3,2) = dUy*drho_dT + Uy*ddrho_dT
-    Jdot(3,4) = drho
-    Jdot(4,1) = dUz*drho_dP + Uz*ddrho_dP
-    Jdot(4,2) = dUz*drho_dT + Uz*ddrho_dT
-    Jdot(4,5) = drho
-    Jdot(5,1) = dE*drho_dP + E*ddrho_dP
-    Jdot(5,2) = dE*drho_dT + E*ddrho_dT + drho*Cv
-    Jdot(5,3) = drho*Ux + rho*dUx
-    Jdot(5,4) = drho*Uy + rho*dUy
-    Jdot(5,5) = drho*Uz + rho*dUz
-  END SUBROUTINE BUILD_DUDW_DOT_5X5
-
-  SUBROUTINE MAP_RESIDUALS_TO_PRIMITIVE_SPACE(cellprimitives, map_derivative, cellprimitivesd)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    LOGICAL, INTENT(IN) :: map_derivative
-    REAL(kind=8), INTENT(IN), OPTIONAL :: cellprimitivesd(:, :)
-    INTEGER(kind=8) :: ncells, c
-    REAL(kind=8) :: wp(5), Jinv(5,5), Jdot(5,5), wpd(5), rv(5), rd(5), rw(5), term2(5)
-    TYPE(FLUIDD) :: fluid
-
-    ncells = SIZE(cellprimitives, 1)
-    IF (.NOT. ALLOCATED(fluxresiduals_sln)) RETURN
-    IF (SIZE(fluxresiduals_sln,1) < ncells .OR. SIZE(fluxresiduals_sln,2) < 5) RETURN
-    fluid%cp = 1005.0d0
-    fluid%r = 287.05d0
-    fluid%gammaa = 1.4d0
-    DO c = 1_8, ncells
-      wp(1:5) = cellprimitives(c, 1:5)
-      CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
-      rv(1:5) = fluxresiduals_sln(c, 1:5)
-      rw = MATMUL(Jinv, rv)
-      fluxresiduals_sln(c, 1:5) = rw
-      IF (map_derivative) THEN
-        IF (ALLOCATED(fluxresiduals_slnd)) THEN
-          IF (SIZE(fluxresiduals_slnd,1) >= ncells .AND. SIZE(fluxresiduals_slnd,2) >= 5) THEN
-            rd(1:5) = fluxresiduals_slnd(c, 1:5)
-            term2 = 0.0_8
-            IF (PRESENT(cellprimitivesd)) THEN
-              IF (SIZE(cellprimitivesd,1) >= ncells .AND. SIZE(cellprimitivesd,2) >= 5) THEN
-                wpd(1:5) = cellprimitivesd(c, 1:5)
-                CALL BUILD_DUDW_DOT_5X5(wp, wpd, fluid, Jdot)
-                term2 = -MATMUL(Jinv, MATMUL(Jdot, rw))
-              END IF
-            END IF
-            fluxresiduals_slnd(c, 1:5) = MATMUL(Jinv, rd) + term2
-          END IF
-        END IF
-      END IF
-    END DO
-  END SUBROUTINE MAP_RESIDUALS_TO_PRIMITIVE_SPACE
-
-  SUBROUTINE VERIFY_RESIDUAL_MAPPING_FD(data_4d137, cellprimitives, cellprimitivesd)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    REAL(kind=8), INTENT(IN) :: cellprimitivesd(:, :)
-    INTEGER(kind=8) :: ncells, c, m
-    REAL(kind=8) :: eps_fd, dir_nrm, num_nrm, den_nrm, rel_err
-    REAL(kind=8), ALLOCATABLE :: cp_plus(:, :), cp_minus(:, :)
-    REAL(kind=8), ALLOCATABLE :: r_ad(:, :), r_fd(:, :), r_plus(:, :), r_minus(:, :)
-    REAL(kind=8), ALLOCATABLE :: r_backup(:, :), rd_backup(:, :)
-    INTRINSIC SQRT, SUM, MAX, ABS
-
-    ncells = SIZE(cellprimitives, 1)
-    IF (ncells < 1_8) RETURN
-    IF (.NOT. ALLOCATED(fluxresiduals_sln)) RETURN
-    IF (.NOT. ALLOCATED(fluxresiduals_slnd)) RETURN
-    IF (SIZE(fluxresiduals_sln, 1) < ncells .OR. SIZE(fluxresiduals_sln, 2) < 5) RETURN
-    IF (SIZE(fluxresiduals_slnd, 1) < ncells .OR. SIZE(fluxresiduals_slnd, 2) < 5) RETURN
-
-    dir_nrm = SQRT(SUM(cellprimitivesd(1:ncells,1:5) * cellprimitivesd(1:ncells,1:5)))
-    eps_fd = 1.0d-7 / MAX(1.0d0, dir_nrm)
-    eps_fd = MAX(1.0d-10, MIN(1.0d-6, eps_fd))
-
-    ALLOCATE(r_ad(ncells,5), r_backup(ncells,5), rd_backup(ncells,5))
-    r_ad = fluxresiduals_slnd(1:ncells,1:5)
-    r_backup = fluxresiduals_sln(1:ncells,1:5)
-    rd_backup = fluxresiduals_slnd(1:ncells,1:5)
-
-    ALLOCATE(cp_plus(ncells,5), cp_minus(ncells,5), r_plus(ncells,5), r_minus(ncells,5), r_fd(ncells,5))
-    cp_plus = cellprimitives
-    cp_minus = cellprimitives
-    cp_plus = cp_plus + eps_fd * cellprimitivesd
-    cp_minus = cp_minus - eps_fd * cellprimitivesd
-
-    DO c = 1_8, ncells
-      cp_plus(c,1) = MAX(cp_plus(c,1), 1.0d-6)
-      cp_plus(c,2) = MAX(cp_plus(c,2), 1.0d-6)
-      cp_minus(c,1) = MAX(cp_minus(c,1), 1.0d-6)
-      cp_minus(c,2) = MAX(cp_minus(c,2), 1.0d-6)
-    END DO
-
-    CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cp_plus)
-    r_plus = fluxresiduals_sln(1:ncells,1:5)
-    CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cp_minus)
-    r_minus = fluxresiduals_sln(1:ncells,1:5)
-    r_fd = (r_plus - r_minus) / (2.0d0 * eps_fd)
-
-    num_nrm = SQRT(SUM((r_ad - r_fd) * (r_ad - r_fd)))
-    den_nrm = MAX(1.0d-30, SQRT(SUM(r_fd * r_fd)))
-    rel_err = num_nrm / den_nrm
-    c = MAX(1_8, ncells/2_8)
-    PRINT *, '[MAP-FD-CHECK] eps=', eps_fd, ' rel_err=', rel_err, ' ||FD||=', den_nrm, ' ||AD||=', SQRT(SUM(r_ad*r_ad))
-    PRINT *, '[MAP-FD-CHECK] sample cell=', c
-    PRINT *, '[MAP-FD-CHECK] AD =', (r_ad(c,m), m=1,5)
-    PRINT *, '[MAP-FD-CHECK] FD =', (r_fd(c,m), m=1,5)
-
-    fluxresiduals_sln(1:ncells,1:5) = r_backup
-    fluxresiduals_slnd(1:ncells,1:5) = rd_backup
-    DEALLOCATE(cp_plus, cp_minus, r_plus, r_minus, r_fd, r_ad, r_backup, rd_backup)
-  END SUBROUTINE VERIFY_RESIDUAL_MAPPING_FD
   SUBROUTINE COMPUTE_STEADY_RESIDUAL_MACH_D(data_4d137, machnum, &
 &   machnumd, cellprimitives)
     IMPLICIT NONE
@@ -8172,7 +7940,7 @@ CONTAINS
     boundaryconditions(4)%params(1) = p
     boundaryconditionsd(4)%params(2:5) = 0.0_8
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = TRIM(mesh_path_runtime)
+    meshpath = 'mesh/OFairfoilMesh'
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL DEALLOCATEMESHDATA(tempmesh)
@@ -8248,7 +8016,7 @@ CONTAINS
     boundaryconditions(4)%type = outletboundary
     boundaryconditions(4)%params(1) = p
     boundaryconditions(4)%params(2:5) = 0.0_8
-    meshpath = TRIM(mesh_path_runtime)
+    meshpath = 'mesh/OFairfoilMesh'
     CALL READOPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL OPENFOAMMESH(meshpath, point_update, tempmesh)
     CALL DEALLOCATEMESHDATA(tempmesh)
@@ -8304,14 +8072,7 @@ CONTAINS
       END IF
     END IF
   END SUBROUTINE COMPUTE_DRAG
-  ! --------------------------------------------------------------------------
-  ! 切線 Jacobian–向量積 ∂R/∂w · v
-  ! 離散殘差 R 通常由守恆形式的通量/源項組裝；獨立變數為原始變數 w=(P,T,U)。
-  ! Tapenade 對 COMPUTE_STEADY_RESIDUAL_D 的 seed 為 cellprimitivesd（primitive），
-  ! 故 fluxresiduals_slnd 與 TANGENT_RHS_I 之 b=-∂R/∂(.) 同源，線性系 (∂R/∂w)x=b 在
-  ! primitive 未知下自洽。若改為 use_conservative_unknown_operator，則須同步變換 RHS
-  ! 與預條件定義，勿僅改其一。
-  ! --------------------------------------------------------------------------
+  !计算雅可比矩阵
   SUBROUTINE TANGENT_MATVEC(data_4d137, cellprimitives, n, v, av)
     IMPLICIT NONE
     REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
@@ -8342,50 +8103,25 @@ CONTAINS
     DEALLOCATE(cellprimitivesd)
   END SUBROUTINE TANGENT_MATVEC
 
-  SUBROUTINE VERIFY_TANGENT_MATVEC_FD(data_4d137, cellprimitives, n)
+  ! 式(17) 對齊：Krylov 算子為 (T+J)v 時使用；否則等同 TANGENT_MATVEC（僅 Jv）
+  SUBROUTINE TZINGER_TANGENT_MATVEC(data_4d137, cellprimitives, n, v, av)
     IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: data_4d137(1,4)
+    REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
     INTEGER(kind=8), INTENT(IN) :: n
-    INTEGER(kind=8) :: ncells, c
-    REAL(kind=8), ALLOCATABLE :: v(:), jv_ad(:), jv_fd(:), r0(:,:), r1(:,:), cp_plus(:,:)
-    REAL(kind=8) :: nv, eps_fd, err_rel, nfd
-    INTRINSIC SQRT, SUM, MAX, SIN, COS
-
-    ncells = n/5
-    IF (ncells <= 0) RETURN
-    ALLOCATE(v(n), jv_ad(n), jv_fd(n), r0(ncells,5), r1(ncells,5), cp_plus(ncells,5))
-
-    DO c = 1_8, n
-      v(c) = SIN(1.3d-3*REAL(c,kind=8)) + 0.35d0*COS(7.0d-4*REAL(c,kind=8))
-    END DO
-    nv = SQRT(SUM(v*v))
-    IF (nv > 1.0d-300) v = v / nv
-
-    CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, v, jv_ad)
-
-    eps_fd = 1.0d-7
-    cp_plus = cellprimitives
-    DO c = 1_8, ncells
-      cp_plus(c,1:5) = cellprimitives(c,1:5) + eps_fd * v((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
-    END DO
-
-    CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitives)
-    r0 = fluxresiduals_sln(1:ncells,1:5)
-    CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cp_plus)
-    r1 = fluxresiduals_sln(1:ncells,1:5)
-
-    DO c = 1_8, ncells
-      jv_fd((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = (r1(c,1:5) - r0(c,1:5)) / eps_fd
-    END DO
-    nfd = SQRT(SUM(jv_fd*jv_fd))
-    err_rel = SQRT(SUM((jv_ad-jv_fd)*(jv_ad-jv_fd))) / MAX(1.0d-300, nfd)
-    PRINT *, '[Jv-FD] rel_err=', err_rel, ' ||Jv_ad||=', SQRT(SUM(jv_ad*jv_ad)), ' ||Jv_fd||=', nfd, ' eps=', eps_fd
-
-    ! 恢复到原始状态对应残差，避免影响后续流程
-    CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitives)
-    DEALLOCATE(v, jv_ad, jv_fd, r0, r1, cp_plus)
-  END SUBROUTINE VERIFY_TANGENT_MATVEC_FD
+    REAL(kind=8), INTENT(IN) :: v(n)
+    REAL(kind=8), INTENT(OUT) :: av(n)
+    INTEGER(kind=8) :: ii
+    INTRINSIC SIZE
+    CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, v, av)
+    IF (pc_tzinger_in_krylov) THEN
+      IF (ALLOCATED(pc_tzinger_T) .AND. SIZE(pc_tzinger_T) >= n) THEN
+	DO ii = 1_8, n
+	  av(ii) = av(ii) + pc_tzinger_T(ii) * v(ii)
+	END DO
+      END IF
+    END IF
+  END SUBROUTINE TZINGER_TANGENT_MATVEC
 
   SUBROUTINE TANGENT_RHS_I(data_4d137, cellprimitives, n, i_param, b_i)
     IMPLICIT NONE
@@ -8397,10 +8133,7 @@ CONTAINS
     INTEGER(kind=8) :: ncells, c
     REAL(kind=8) :: data_4d137d(1, 4), normb, normR
     REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
-    REAL(kind=8) :: eps_fd, rel_rhs_fd, nfd
-    REAL(kind=8) :: data_4d137_plus(1,4)
-    REAL(kind=8), ALLOCATABLE :: r0(:,:), r1(:,:), b_fd(:)
-    INTRINSIC SQRT, SUM, MAX
+    INTRINSIC SQRT, SUM
     ncells = n/5
     ALLOCATE(cellprimitivesd(ncells, 5))
     cellprimitivesd = 0.0_8
@@ -8419,30 +8152,11 @@ CONTAINS
     normb = SQRT(SUM(b_i*b_i))
     normR = SQRT(SUM(fluxresiduals_sln(1:ncells, 1:5)**2))
     PRINT *, '  [RHS] i_param=', i_param, ' n=', n, ' ncells=', ncells
-	    PRINT *, '  [RHS] ||b||=', normb, ' ||R||=', normR, ' max|b|=', MAXVAL(ABS(b_i))
-	    PRINT *, '  [RHS] b(1:5)=', b_i(1:5)
-	    PRINT *, '  [RHS] b(n/2:n/2+4)=', b_i(n/2:n/2+4)
-      IF (tangent_verify_rhs_fd_once) THEN
-        ALLOCATE(r0(ncells,5), r1(ncells,5), b_fd(n))
-        eps_fd = 1.0d-7 * MAX(1.0d0, ABS(data_4d137(1,i_param)))
-        CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitives)
-        r0 = fluxresiduals_sln(1:ncells,1:5)
-        data_4d137_plus = data_4d137
-        data_4d137_plus(1,i_param) = data_4d137_plus(1,i_param) + eps_fd
-        CALL COMPUTE_STEADY_RESIDUAL(data_4d137_plus, cellprimitives)
-        r1 = fluxresiduals_sln(1:ncells,1:5)
-        DO c = 1, ncells
-          b_fd((c-1)*5+1:(c-1)*5+5) = -(r1(c,1:5)-r0(c,1:5))/eps_fd
-        END DO
-        nfd = SQRT(SUM(b_fd*b_fd))
-        rel_rhs_fd = SQRT(SUM((b_i-b_fd)*(b_i-b_fd))) / MAX(1.0d-300, nfd)
-        PRINT *, '[RHS-FD] i_param=', i_param, ' rel_err=', rel_rhs_fd, ' ||b_fd||=', nfd, ' eps=', eps_fd
-        CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitives)
-        DEALLOCATE(r0, r1, b_fd)
-        tangent_verify_rhs_fd_once = .FALSE.
-      END IF
-	    DEALLOCATE(cellprimitivesd)
-	  END SUBROUTINE TANGENT_RHS_I
+    PRINT *, '  [RHS] ||b||=', normb, ' ||R||=', normR, ' max|b|=', MAXVAL(ABS(b_i))
+    PRINT *, '  [RHS] b(1:5)=', b_i(1:5)
+    PRINT *, '  [RHS] b(n/2:n/2+4)=', b_i(n/2:n/2+4)
+    DEALLOCATE(cellprimitivesd)
+  END SUBROUTINE TANGENT_RHS_I
   SUBROUTINE TANGENT_RHS_MACH(data_4d137, cellprimitives, machnum, n, b_i)
     IMPLICIT NONE
     REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
@@ -8465,15 +8179,6 @@ CONTAINS
     DEALLOCATE(cellprimitivesd)
   END SUBROUTINE TANGENT_RHS_MACH
 
-		!============================================================================
-	! 子程序: SOLVE_TANGENT_JFGMRES
-	!============================================================================
-	! 功能: 使用 GMRES(m) 求解切线线性系统 (dR/dw)*x = b。
-	!       与伴隨结构对齐：1-based 下标、h 就地 Givens、下一轮残差用 r = V*e1。
-	!
-	! 输入: data_4d137, cellprimitives, n, b, x, tol, maxiter, m_restart
-	! 输出: x (解), info (0=收敛 1=未收敛 2=异常)
-	!============================================================================
 	SUBROUTINE SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitives, n, b, x, tol, maxiter, m_restart, info)
 	  IMPLICIT NONE
 	  !---------------------------------------------------------------------------
@@ -8498,113 +8203,54 @@ CONTAINS
 		END SUBROUTINE DGELS
 	  END INTERFACE
 
-	  REAL(kind=8), ALLOCATABLE :: r(:), v(:, :), z_basis(:, :), w(:), h(:, :), y(:), z(:), tmp(:)
-	  REAL(kind=8), ALLOCATABLE :: r_lin(:), r_work(:), x_work(:), q_tmp(:), q_inv_tmp(:)
-	  REAL(kind=8), ALLOCATABLE :: rec_mat(:,:), rec_alpha(:), rec_ap(:,:), p_new(:), ap_new(:)
-	  REAL(kind=8) :: bnrm, rnrm_true, relres_true, tol_b, beta_kry, res_ls, &
+	  REAL(kind=8), ALLOCATABLE :: r(:), v(:, :), w(:), h(:, :), y(:), z(:), tmp(:)
+	  REAL(kind=8) :: bnrm, rnrm_true, tol_b, beta_kry, res_ls, &
   xnrm_old, xnrm_new, znrm, rcheck, v1norm
       REAL(kind=8) :: eta_k, eta_prev, tol_b_k, phi_exp
  	  REAL(kind=8) :: eps_reg
-	  INTEGER(kind=8) :: k, j, m_dim, i, rec_k, rec_pos
-	  INTEGER :: mm, nn, nrhs, info_ls, lwk, mm_rec, nn_rec, info_rec, lwk_rec
+	  INTEGER(kind=8) :: k, j, m_dim, i
+	  INTEGER :: mm, nn, nrhs, info_ls, lwk
 	  DOUBLE PRECISION, ALLOCATABLE :: A_ls(:,:), b_ls(:), work_ls(:), resid(:)
-	  DOUBLE PRECISION, ALLOCATABLE :: A_rec_ls(:,:), b_rec_ls(:), work_rec_ls(:)
 	  REAL(kind=8) :: ynrm, tmpnrm, xnrm, drel
 	  LOGICAL, SAVE :: diag_done = .FALSE.
 	  REAL(kind=8) :: resid1, sum_h1y, h1norm
 	  REAL(kind=8) :: delta_w_norm, r_old_norm
 	  REAL(kind=8) :: Hy_norm, hy_i
 	  REAL(kind=8) :: v1_norm_dbg, Av1_norm_dbg, h11_dbg, h21_dbg, dot12_dbg, v2_norm_dbg
-	  REAL(kind=8) :: sigma_ptc, sigma_rel, rnrm_prev_outer, rnrm_before_update, outer_ratio, ptc_step_omega, outer_ratio_eta
-	  REAL(kind=8) :: prev_relres
-	  REAL(kind=8) :: relres_block_start, block_drop_abs, block_drop_pct, block_drop_ratio
-	  REAL(kind=8) :: rnrm_aug_before, rnrm_aug_after, pnorm
-	  REAL(kind=8) :: tmgs
-	  LOGICAL :: pc_active, strict_linear_mode, use_ptc_local
-	  INTEGER(kind=8) :: outer_block_start
 
 	  INTRINSIC SQRT, ABS, SUM, MIN
 
 	  info = 2
 	  IF (maxiter <= 0) RETURN
-	  IF (tangent_verify_jv_fd_once) THEN
-	    CALL VERIFY_TANGENT_MATVEC_FD(data_4d137, cellprimitives, n)
-	    tangent_verify_jv_fd_once = .FALSE.
-	  END IF
 
-	  pc_active = pc_ready .AND. (.NOT. gmres_tangent_skip_pc)
-	  strict_linear_mode = pc_active .AND. pc_adflow_strict_linear_pc
-	  use_ptc_local = pc_use_ptc_shift .AND. (.NOT. strict_linear_mode)
-	  IF (strict_linear_mode) THEN
-		IF (pc_use_amp_guard) PRINT *, '[ADFLOW-ALIGN] disable amp_guard for linear GMRES consistency.'
-		IF (pc_use_inner_richardson) PRINT *, '[ADFLOW-ALIGN] disable inner_richardson for fixed right-PC.'
-		pc_use_amp_guard = .FALSE.
-		pc_use_inner_richardson = .FALSE.
-		pc_inner_rich_iters = 1_8
-	  END IF
-	  IF (pc_dafoam_consistency_mode) THEN
-		use_conservative_unknown_operator = .FALSE.
-		use_primitive_residual_operator = .FALSE.
-	  END IF
-	  IF (gmres_tangent_skip_pc .AND. pc_ready) THEN
-		PRINT *, '[GMRES] tangent PC override: nopc（診斷：仍建 PC 矩陣，Arnoldi 內 z=v）'
-	  ELSE IF (pc_active) THEN
+	  IF (pc_ready) THEN
 		PRINT *, '[GMRES] preconditioner ready = T (右預條件：仍依 TANGENT_MATVEC 路徑)'
 	  ELSE
 		PRINT *, '[GMRES] preconditioner ready = F（無預條件，z=v）'
 	  END IF
 
-	  ALLOCATE(r(n), v(n, m_restart+1), z_basis(n, m_restart), w(n), h(m_restart+1, m_restart), &
+	  ALLOCATE(r(n), v(n, m_restart+1), w(n), h(m_restart+1, m_restart), &
 	&          y(m_restart), z(n), tmp(n))
-	  ALLOCATE(r_lin(n), r_work(n), x_work(n), q_tmp(n), q_inv_tmp(n))
-	  IF (use_conservative_unknown_operator) THEN
-		CALL APPLY_DW_TO_DU(cellprimitives, x, x_work)
-	  ELSE
-		x_work = x
-	  END IF
-	  IF (.NOT. gmres_recycle_enabled) gmres_recycle_cols = 0_8
-	  IF (gmres_recycle_enabled .AND. gmres_recycle_max_vecs > 0_8) THEN
-		IF (gmres_recycle_n /= n .OR. .NOT. ALLOCATED(gmres_recycle_p) .OR. &
-	&       SIZE(gmres_recycle_p, 2) /= INT(gmres_recycle_max_vecs)) THEN
-		  IF (ALLOCATED(gmres_recycle_p)) DEALLOCATE(gmres_recycle_p)
-		  IF (ALLOCATED(gmres_recycle_ap)) DEALLOCATE(gmres_recycle_ap)
-		  ALLOCATE(gmres_recycle_p(n, gmres_recycle_max_vecs), gmres_recycle_ap(n, gmres_recycle_max_vecs))
-		  gmres_recycle_p = 0.0_8
-		  gmres_recycle_ap = 0.0_8
-		  gmres_recycle_n = n
-		  gmres_recycle_cols = 0_8
-		END IF
-	  ELSE
-		IF (ALLOCATED(gmres_recycle_p)) DEALLOCATE(gmres_recycle_p)
-		IF (ALLOCATED(gmres_recycle_ap)) DEALLOCATE(gmres_recycle_ap)
-		gmres_recycle_n = 0_8
-		gmres_recycle_cols = 0_8
-	  END IF
 
 	  ! ---------- 初始真殘差 r = b - A*x ----------
 	  bnrm = SQRT(SUM(b*b))
 	  IF (bnrm < eps_small) bnrm = 1.0_8
 	  tol_b = tol * bnrm
-	    ! inexact forcing（參考論文：由 0.5 起逐步下降；下限見 tangent_gmres_eta_floor）
+	    ! inexact forcing（参考论文思路：从 0.5 逐步降到 0.01）
   	  eta_prev = 0.5_8
  	  phi_exp  = (1.0_8 + SQRT(5.0_8)) / 2.0_8
 	  !!!!!!正则化，待删/缺乏一个反回归,否则有误差
 !	  eps_reg = 5.0d-8 * bnrm!1.0d-4
 !	  PRINT *, '[REG] eps_reg=', eps_reg, ' eps_reg/||b||=', eps_reg/bnrm
       !!!!!!!
-	  CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, x_work, 0.0_8, w, q_inv_tmp)
-	  PRINT *, '[GMRES-DBG] init x-norm=', SQRT(SUM(x_work*x_work))
+	  CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x, w)
+	  PRINT *, '[GMRES-DBG] init x-norm=', SQRT(SUM(x*x))
 	  PRINT *, '[GMRES-DBG] init w-norm=', SQRT(SUM(w*w))
 	  PRINT *, '[GMRES-DBG] init b-norm=', bnrm
-	  PRINT *, '[GMRES-DBG] init x(1:5)=', x_work(1:5)
+	  PRINT *, '[GMRES-DBG] init x(1:5)=', x(1:5)
 	  PRINT *, '[GMRES-DBG] init w(1:5)=', w(1:5)
 	  r = b - w
-	  IF (use_primitive_residual_operator) THEN
-		CALL APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r, r_work)
-		r = r_work
-	  END IF
 	  rnrm_true = SQRT(SUM(r*r))
-	  relres_true = rnrm_true / MAX(1.0d-300, bnrm)
 
 	  ! ---------- 線性算子診斷（僅一次）----------
 	  IF (.NOT. diag_done) THEN
@@ -8644,40 +8290,20 @@ CONTAINS
 	  END IF
 
 	  PRINT *, '  [GMRES] ||b||=', bnrm, ' tol*||b||=', tol_b, &
-&    ' ||r0_true||=', rnrm_true, ' ||r0_true||/||b||=', relres_true
+	&    ' ||r0_true||=', rnrm_true, ' ||r0_true||/||b||=', rnrm_true/bnrm
 
 	  IF (rnrm_true <= tol_b) THEN
 		info = 0
-		pc_last_true_relres = relres_true
-		IF (use_conservative_unknown_operator) THEN
-		  CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
-		ELSE
-		  x = x_work
-		END IF
-		DEALLOCATE(r, v, z_basis, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
+		DEALLOCATE(r, v, w, h, y, z, tmp)
 		RETURN
 	  END IF
-	  rnrm_prev_outer = rnrm_true
-	  relres_block_start = relres_true
-	  outer_block_start = 1_8
-	  ptc_step_omega = 1.0_8
-	  IF (use_ptc_local) ptc_step_omega = MIN(pc_ptc_outer_damp_max, MAX(pc_ptc_outer_damp_min, pc_ptc_outer_damp))
 
 	  ! ===================== 外層 restart =====================
 	  DO k = 1, maxiter
 	    IF (k == 1_8) THEN
-			  IF (use_ptc_local) THEN
-			    eta_k = pc_ptc_eta_ceiling
-			  ELSE
-			    eta_k = eta_prev
-			  END IF
-			ELSE
-			  IF (use_ptc_local) THEN
-			    outer_ratio_eta = rnrm_true / MAX(1.0d-300, rnrm_prev_outer)
-			    eta_k = MIN(pc_ptc_eta_ceiling, MAX(pc_ptc_eta_floor, 0.70_8 * outer_ratio_eta**1.2_8))
-			  ELSE
-		    eta_k = MAX(tangent_gmres_eta_floor, 0.5_8 * eta_prev**phi_exp)
-		  END IF
+		  eta_k = eta_prev
+		ELSE
+		  eta_k = MAX(0.2_8, 0.5_8 * eta_prev**phi_exp)
 		  PRINT *, '[GMRES-DBG] outer=', k, ' eta_k=', eta_k, &
 &        ' beta_kry=', beta_kry, ' res_ls=', res_ls, &
 &        ' res_ls/(eta_k*beta)=', res_ls / MAX(1.0d-300, eta_k*beta_kry)
@@ -8687,66 +8313,6 @@ CONTAINS
 		  eta_prev = eta_k
 		END IF
 		tol_b_k = eta_k * bnrm
-		sigma_ptc = 0.0_8
-		outer_ratio = 1.0_8
-		IF (use_ptc_local .AND. pc_a0_ready) THEN
-		  IF (k > 1_8) THEN
-		    outer_ratio = rnrm_true / MAX(1.0d-300, rnrm_prev_outer)
-		    IF (outer_ratio > 0.97_8) THEN
-		      pc_ptc_alpha = MIN(pc_ptc_alpha_max, pc_ptc_alpha * pc_ptc_inc)
-		      ptc_step_omega = MAX(pc_ptc_outer_damp_min, ptc_step_omega * pc_ptc_outer_shrink)
-		    ELSEIF (outer_ratio < 0.70_8) THEN
-		      pc_ptc_alpha = MAX(pc_ptc_alpha_min, pc_ptc_alpha * pc_ptc_dec)
-		      ptc_step_omega = MIN(pc_ptc_outer_damp_max, ptc_step_omega * pc_ptc_outer_grow)
-		    END IF
-		  END IF
-		  sigma_rel = MAX(pc_ptc_min_rel, (rnrm_true / MAX(1.0d-300, bnrm))**pc_ptc_power)
-		  sigma_ptc = pc_ptc_alpha * pc_a0_diag_mean * sigma_rel
-		  PRINT *, '[PTC-ADAPT] outer=', k, ' ratio=', outer_ratio, ' alpha=', pc_ptc_alpha, &
-		  &       ' sigma=', sigma_ptc, ' omega=', ptc_step_omega, ' eta=', eta_k
-		END IF
-		PRINT *, '[GMRES-DBG] outer=', k, ' sigma_ptc=', sigma_ptc, ' diag_mean=', pc_a0_diag_mean
-		IF (gmres_recycle_enabled .AND. gmres_recycle_cols > 0_8) THEN
-		  rnrm_aug_before = rnrm_true
-		  rec_k = gmres_recycle_cols
-		  mm_rec = INT(n)
-		  nn_rec = INT(rec_k)
-		  ALLOCATE(rec_mat(n, rec_k), rec_ap(n, rec_k), rec_alpha(rec_k))
-		  rec_ap = gmres_recycle_ap(1:n, 1:rec_k)
-		  IF (sigma_ptc > 0.0_8) rec_ap = rec_ap + sigma_ptc * gmres_recycle_p(1:n, 1:rec_k)
-		  rec_mat = rec_ap
-		  ALLOCATE(A_rec_ls(mm_rec, nn_rec), b_rec_ls(MAX(mm_rec, nn_rec)), work_rec_ls(1))
-		  A_rec_ls = rec_mat
-		  b_rec_ls = 0.0d0
-		  b_rec_ls(1:mm_rec) = r(1:n)
-		  CALL DGELS('N', mm_rec, nn_rec, 1, A_rec_ls, mm_rec, b_rec_ls, mm_rec, work_rec_ls, -1, info_rec)
-		  lwk_rec = MAX(1, INT(CEILING(work_rec_ls(1))))
-		  DEALLOCATE(work_rec_ls)
-		  ALLOCATE(work_rec_ls(lwk_rec))
-		  A_rec_ls = rec_mat
-		  b_rec_ls = 0.0d0
-		  b_rec_ls(1:mm_rec) = r(1:n)
-		  CALL DGELS('N', mm_rec, nn_rec, 1, A_rec_ls, mm_rec, b_rec_ls, mm_rec, work_rec_ls, lwk_rec, info_rec)
-		  rec_alpha = REAL(b_rec_ls(1:nn_rec), kind=8)
-		  tmp(1:n) = MATMUL(gmres_recycle_p(1:n, 1:rec_k), rec_alpha)
-		  x_work(1:n) = x_work(1:n) + tmp(1:n)
-		  r(1:n) = r(1:n) - MATMUL(rec_ap(1:n, 1:rec_k), rec_alpha)
-		  rnrm_true = SQRT(SUM(r*r))
-		  rnrm_aug_after = rnrm_true
-		  PRINT *, '[GMRES-REC] outer=', k, ' cols=', rec_k, &
-	&       ' ||r||/||b||: ', rnrm_aug_before/bnrm, ' -> ', rnrm_aug_after/bnrm
-		  DEALLOCATE(A_rec_ls, b_rec_ls, work_rec_ls, rec_mat, rec_ap, rec_alpha)
-		  IF (rnrm_true <= tol_b) THEN
-			info = 0
-			IF (use_conservative_unknown_operator) THEN
-			  CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
-			ELSE
-			  x = x_work
-			END IF
-			DEALLOCATE(r, v, z_basis, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
-			RETURN
-		  END IF
-		END IF
 
 		! 本輪 Krylov 的起始：beta = ||r||，v1 = r/||r||
 		beta_kry = rnrm_true
@@ -8756,12 +8322,7 @@ CONTAINS
          ' rnorm(start)/||b||=', rnrm_true / bnrm
 		IF (beta_kry < eps_small) THEN
 		  info = 0
-		  IF (use_conservative_unknown_operator) THEN
-		    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
-		  ELSE
-		    x = x_work
-		  END IF
-		  DEALLOCATE(r, v, z_basis, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
+		  DEALLOCATE(r, v, w, h, y, z, tmp)
 		  RETURN
 		END IF
 		v(1:n, 1) = r / beta_kry
@@ -8775,14 +8336,17 @@ CONTAINS
 		! ===================== Arnoldi：只組 H，不對 H 做 Givens =====================
 		DO j = 1, m_restart
 
-		  IF (pc_active) THEN
+		  IF (pc_ready) THEN
 		    CALL APPLY_PC_INV(v(1:n, j), z)
 		  ELSE
 		    z(1:n) = v(1:n, j)
 		  END IF
-		  z_basis(1:n, j) = z(1:n)
+	      IF (pc_ready .AND. k == 1 .AND. j == 1) THEN
+			PRINT *, ' [PCDBG] Arnoldi k=1 j=1: ||v||=', SQRT(SUM(v(1:n,1)*v(1:n,1))), &
+					 ' ||z||=', SQRT(SUM(z(1:n)*z(1:n)))
+		  END IF
 		  ! w = A * z ，matrix-free；A 對應 dR/dw 在當前線性化點
-		  CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, z, sigma_ptc, w, q_inv_tmp)
+		  CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, z, w)
 		  !!!!!!!!!正则化，待删/缺乏一个反回归
 !		  w(1:n) = w(1:n) + eps_reg * z(1:n)   ! (A + eps I) z
 		  !!!!!!!!!!
@@ -8791,27 +8355,15 @@ CONTAINS
 			  Av1_norm_dbg = SQRT(SUM(w*w))
 			  h11_dbg      = DOT_PRODUCT(v(1:n,1), w)
 			  PRINT *, '[GMRES-DBG] outer=', k, ' j=1: ||v1||=', v1_norm_dbg, &
-			&           ' ||A*z||=', Av1_norm_dbg, ' (z=M^{-1}v1) h(1,1)=', h11_dbg
-		    IF (pc_active) THEN
-		      PRINT *, ' [PCDBG] Arnoldi outer=', k, ' j=1: ||z||=', SQRT(SUM(z*z)), &
-		          & ' ||A*z||/||z||=', Av1_norm_dbg/MAX(1.0d-300,SQRT(SUM(z*z)))
-		    END IF
+			&           ' ||A*v1||=', Av1_norm_dbg, ' h(1,1)=', h11_dbg
 		  END IF
 		  v(1:n, j+1) = w
 
-		  ! 修正 Gram–Schmidt；可選第二遍（對照 DALinearEqn：KSP_GMRES_CGS_REFINE_IFNEEDED，
-		  !    與 KSP_NORM_UNPRECONDITIONED 監控「真 ‖b-Ax‖」配套）
+		  ! 修正 Gram–Schmidt（一遍即可；若要可加第二遍）
 		  DO i = 1, j
 		    h(i, j) = DOT_PRODUCT(v(1:n, i), v(1:n, j+1))
 		    v(1:n, j+1) = v(1:n, j+1) - h(i, j) * v(1:n, i)
 		  END DO
-		  IF (gmres_arnoldi_two_pass) THEN
-		    DO i = 1, j
-		      tmgs = DOT_PRODUCT(v(1:n, i), v(1:n, j+1))
-		      h(i, j) = h(i, j) + tmgs
-		      v(1:n, j+1) = v(1:n, j+1) - tmgs * v(1:n, i)
-		    END DO
-		  END IF
 
 		  h(j+1, j) = SQRT(SUM(v(1:n, j+1) * v(1:n, j+1)))
 		  IF (h(j+1, j) < eps_small) THEN
@@ -8827,14 +8379,13 @@ CONTAINS
 		  v(1:n, j+1) = v(1:n, j+1) / h(j+1, j)
 		  m_dim = j
 
-		 IF (j == m_restart .OR. (m_restart > 10_8 .AND. MOD(j, MAX(30_8, m_restart/3_8)) == 0_8)) &
-		 &   PRINT *, '[GMRES] Arnoldi j=', j, ' / ', m_restart
+		 IF (MOD(j, 50_8) == 0_8) PRINT *, '[GMRES] Arnoldi j=', j, ' / ', m_restart
 		END DO
 
 		IF (m_dim < 1) THEN
 		  info = 2
 		  PRINT *, '[GMRES] Arnoldi breakdown: m_dim=', m_dim
-		  DEALLOCATE(r, v, z_basis, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
+		  DEALLOCATE(r, v, w, h, y, z, tmp)
 		  RETURN
 		END IF
 
@@ -8915,88 +8466,43 @@ CONTAINS
 		 &         res_ls / MAX(1.0d-300, beta_kry), ' eta_k=', eta_k
 		END IF
 
-		! ===================== 解更新：右預條件下 x <- x + Z y（Z(:,j)=P^{-1}V(:,j)）=====================
-		xnrm_old = SQRT(SUM(x_work(1:n)*x_work(1:n)))
-		tmp(1:n) = MATMUL(z_basis(1:n, 1:m_dim), y(1:m_dim))
+		! ===================== 解更新：右預條件下 x <- x + P^{-1} V y =====================
+		xnrm_old = SQRT(SUM(x(1:n)*x(1:n)))
+		tmp(1:n) = MATMUL(v(1:n, 1:m_dim), y(1:m_dim))		
 		tmpnrm = SQRT(SUM(tmp(1:n)*tmp(1:n)))
-		xnrm   = SQRT(SUM(x_work(1:n)*x_work(1:n)))
+		xnrm   = SQRT(SUM(x(1:n)*x(1:n)))
 		drel   = tmpnrm / MAX(1.0d-300, xnrm)
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||tmp||=', tmpnrm, ' ||x||=', xnrm, ' ||tmp||/||x||=', drel
-		z(1:n) = tmp(1:n)
+		IF (pc_ready) THEN
+		  CALL APPLY_PC_INV(tmp, z)
+		ELSE
+		  z(1:n) = tmp(1:n)
+		END IF
 		znrm = SQRT(SUM(z(1:n)*z(1:n)))
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||z||=', znrm, &
          ' ||x_old||=', xnrm_old, ' ||z||/||x_old||=', &
          (znrm / MAX(1.0d-300, xnrm_old))
         ! delta_x = z；檢查 A*delta_x 是否很小
 		r_old_norm = beta_kry   ! 因為你每個 restart 的 rnorm(start) 就是 beta_kry
-		CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, z, sigma_ptc, w, q_inv_tmp)
+		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, z, w)
 		delta_w_norm = SQRT(SUM(w*w))
 
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||A*delta_x||=', delta_w_norm, &
 		&         ' ||r_old||=', r_old_norm, ' ratio=', delta_w_norm/ MAX(1.0d-300, r_old_norm)
-		x_work(1:n) = x_work(1:n) + ptc_step_omega * tangent_gmres_dx_damp * z(1:n)
-		xnrm_new = SQRT(SUM(x_work(1:n)*x_work(1:n)))
+		x(1:n) = x(1:n) + z(1:n)
+		xnrm_new = SQRT(SUM(x(1:n)*x(1:n)))
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||x_new||=', xnrm_new
-		IF (gmres_recycle_enabled .AND. gmres_recycle_max_vecs > 0_8) THEN
-		  ALLOCATE(p_new(n), ap_new(n))
-		  p_new(1:n) = ptc_step_omega * tangent_gmres_dx_damp * z(1:n)
-		  IF (gmres_recycle_cols > 0_8) THEN
-			DO j = 1_8, gmres_recycle_cols
-			  drel = DOT_PRODUCT(gmres_recycle_p(1:n, j), p_new(1:n))
-			  p_new(1:n) = p_new(1:n) - drel * gmres_recycle_p(1:n, j)
-			END DO
-		  END IF
-		  pnorm = SQRT(SUM(p_new*p_new))
-		  IF (pnorm > gmres_recycle_min_norm) THEN
-			p_new = p_new / pnorm
-			CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, p_new, 0.0_8, ap_new, q_inv_tmp)
-			rec_pos = MIN(gmres_recycle_cols + 1_8, gmres_recycle_max_vecs)
-			IF (gmres_recycle_cols == gmres_recycle_max_vecs) THEN
-			  gmres_recycle_p(1:n, 1:gmres_recycle_max_vecs-1_8) = gmres_recycle_p(1:n, 2:gmres_recycle_max_vecs)
-			  gmres_recycle_ap(1:n, 1:gmres_recycle_max_vecs-1_8) = gmres_recycle_ap(1:n, 2:gmres_recycle_max_vecs)
-			ELSE
-			  gmres_recycle_cols = gmres_recycle_cols + 1_8
-			END IF
-			gmres_recycle_p(1:n, rec_pos) = p_new
-			gmres_recycle_ap(1:n, rec_pos) = ap_new
-		  END IF
-		  DEALLOCATE(p_new, ap_new)
-		END IF
 
 		! 真殘差
-		rnrm_before_update = rnrm_true
-		CALL APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, x_work, 0.0_8, w, q_inv_tmp)
+		CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, x, w)
 		!!!!!正则化，待删/缺乏一个反回归
 !		w(1:n) = w(1:n) + eps_reg * x(1:n)
 		!!!!!
 		r = b - w
-		IF (use_primitive_residual_operator) THEN
-		  CALL APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r, r_work)
-		  r = r_work
-		END IF
 		rnrm_true = SQRT(SUM(r*r))
-		relres_true = rnrm_true / MAX(1.0d-300, bnrm)
-		rnrm_prev_outer = rnrm_before_update
 		PRINT *, '  [GMRES] outer=', k, ' true||r||=', rnrm_true, &
-&      ' true||r||/||b||=', relres_true, ' eta_k=', eta_k, &
+&      ' true||r||/||b||=', rnrm_true/bnrm, ' eta_k=', eta_k, &
 &      ' converged=', (rnrm_true <= tol_b)
-		prev_relres = pc_last_true_relres
-		IF (prev_relres > 0.0_8) THEN
-		  IF ((relres_true > pc_rebuild_relres_trigger) .AND. &
-		&     (relres_true > pc_rebuild_growth_trigger * prev_relres)) THEN
-			pc_force_rebuild_next = .TRUE.
-		  END IF
-		ELSE
-		  IF (relres_true > 10.0_8 * pc_rebuild_relres_trigger) THEN
-			pc_force_rebuild_next = .TRUE.
-		  END IF
-		END IF
-		pc_last_true_relres = relres_true
-		IF (pc_force_rebuild_next) THEN
-		  PRINT *, '[PC-LAG-TRIGGER] next build forced: relres=', relres_true, &
-			& ' last=', prev_relres, ' abs_th=', pc_rebuild_relres_trigger, &
-			& ' growth_th=', pc_rebuild_growth_trigger
-		END IF
 
 		dot_r_v1 = ABS(DOT_PRODUCT(r, v(1:n, 1)))
 		dot_r_vm = ABS(DOT_PRODUCT(r, v(1:n, m_dim)))
@@ -9007,66 +8513,12 @@ CONTAINS
 		PRINT *, '[GMRES-DBG] outer=', k, &
 				 ' |<r,v1>|/||r||=', rel_dot_v1, &
 				 ' |<r,v_last>|/||r||=', rel_dot_vm
-			PRINT *, '[GMRES-DBG] outer=', k, ' res_ls/|b|=', res_ls/bnrm, &
-	         ' true_res/|b|=', rnrm_true/bnrm, ' beta_kry/|b|=', beta_kry/bnrm
-			IF (MOD(k, 10_8) == 0_8) THEN
-			  block_drop_abs = relres_block_start - relres_true
-			  block_drop_pct = 100.0_8 * block_drop_abs / MAX(1.0d-300, relres_block_start)
-			  block_drop_ratio = relres_block_start / MAX(1.0d-300, relres_true)
-			  IF (pc_use_colored_ad) THEN
-			    PRINT *, '[OPT-10OUTER] colored_ad outer=', outer_block_start, '->', k, &
-			      & ' relres=', relres_block_start, ' -> ', relres_true, &
-			      & ' drop_abs=', block_drop_abs, ' drop_pct=', block_drop_pct, '%', &
-			      & ' speedup_x=', block_drop_ratio
-			  END IF
-			  IF (pc_use_full_ad_pattern_refresh) THEN
-			    PRINT *, '[OPT-10OUTER] full_ad_pattern_refresh outer=', outer_block_start, '->', k, &
-			      & ' relres=', relres_block_start, ' -> ', relres_true, &
-			      & ' drop_abs=', block_drop_abs, ' drop_pct=', block_drop_pct, '%', &
-			      & ' speedup_x=', block_drop_ratio
-			  END IF
-			  IF (pc_use_asm_subdomain_ilu) THEN
-			    PRINT *, '[OPT-10OUTER] asm_subdomain_ilu outer=', outer_block_start, '->', k, &
-			      & ' relres=', relres_block_start, ' -> ', relres_true, &
-			      & ' drop_abs=', block_drop_abs, ' drop_pct=', block_drop_pct, '%', &
-			      & ' speedup_x=', block_drop_ratio
-			  END IF
-			  IF (pc_use_two_level) THEN
-			    PRINT *, '[OPT-10OUTER] two_level_coarse outer=', outer_block_start, '->', k, &
-			      & ' relres=', relres_block_start, ' -> ', relres_true, &
-			      & ' drop_abs=', block_drop_abs, ' drop_pct=', block_drop_pct, '%', &
-			      & ' speedup_x=', block_drop_ratio
-			  END IF
-			  IF (pc_use_ptc_shift) THEN
-			    PRINT *, '[OPT-10OUTER] ptc_shift outer=', outer_block_start, '->', k, &
-			      & ' relres=', relres_block_start, ' -> ', relres_true, &
-			      & ' drop_abs=', block_drop_abs, ' drop_pct=', block_drop_pct, '%', &
-			      & ' speedup_x=', block_drop_ratio
-			  END IF
-			  IF (gmres_arnoldi_two_pass) THEN
-			    PRINT *, '[OPT-10OUTER] arnoldi_two_pass outer=', outer_block_start, '->', k, &
-			      & ' relres=', relres_block_start, ' -> ', relres_true, &
-			      & ' drop_abs=', block_drop_abs, ' drop_pct=', block_drop_pct, '%', &
-			      & ' speedup_x=', block_drop_ratio
-			  END IF
-			  IF (pc_use_lagged_update) THEN
-			    PRINT *, '[OPT-10OUTER] lagged_update outer=', outer_block_start, '->', k, &
-			      & ' relres=', relres_block_start, ' -> ', relres_true, &
-			      & ' drop_abs=', block_drop_abs, ' drop_pct=', block_drop_pct, '%', &
-			      & ' speedup_x=', block_drop_ratio
-			  END IF
-			  outer_block_start = k + 1_8
-			  relres_block_start = relres_true
-			END IF
+	    PRINT *, '[GMRES-DBG] outer=', k, ' res_ls/|b|=', res_ls/bnrm, &
+         ' true_res/|b|=', rnrm_true/bnrm, ' beta_kry/|b|=', beta_kry/bnrm
 
-			IF (rnrm_true <= tol_b) THEN
+		IF (rnrm_true <= tol_b) THEN
 		  info = 0
-		  IF (use_conservative_unknown_operator) THEN
-		    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
-		  ELSE
-		    x = x_work
-		  END IF
-		  DEALLOCATE(r, v, z_basis, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
+		  DEALLOCATE(r, v, w, h, y, z, tmp)
 		  RETURN
 		END IF
 	  END DO
@@ -9076,13 +8528,8 @@ CONTAINS
 	  ELSE
 		info = 1
 	  END IF
-	  pc_last_true_relres = rnrm_true / MAX(1.0d-300, bnrm)
-	  IF (use_conservative_unknown_operator) THEN
-	    CALL APPLY_DU_TO_DW(cellprimitives, x_work, x)
-	  ELSE
-	    x = x_work
-	  END IF
-	  DEALLOCATE(r, v, z_basis, w, h, y, z, tmp, r_lin, r_work, x_work, q_tmp, q_inv_tmp)
+
+	  DEALLOCATE(r, v, w, h, y, z, tmp)
 
 	END SUBROUTINE SOLVE_TANGENT_JFGMRES
   SUBROUTINE OUTPUT_WALL_CP_CSV(meshpath, point_update, cellprimitives, &
@@ -9102,13 +8549,13 @@ CONTAINS
     REAL(kind=8) :: sum_p, sum_dp(5), point_pressure, point_dPdx(5), Cp, dCp_dx(5)
     REAL(kind=8), PARAMETER :: safe_max = 1.0d30
     INTRINSIC SIZE, MIN, MAXVAL, REAL
-    IF (debug_heavy_io) print *, "ACD"
+    print *, "ACD"
     CALL OPENFOAMMESH_FINDCELLPTS(meshpath, pointlocations, cells, point_update)
-    IF (debug_heavy_io) print *, "ACD"
+    print *, "ACD"
     ncells_used = SIZE(cells%cells)
     npoints = SIZE(pointlocations, 1)
     nout = MIN(99_8, npoints)
-    IF (debug_heavy_io) print *, "ACD"
+    print *, "ACD"
     IF (nout .LE. 0) RETURN
     ALLOCATE(point_cell_count(npoints))
     point_cell_count = 0
@@ -9122,7 +8569,7 @@ CONTAINS
     k = MAX(1_8, MIN(max_per_point, MAXVAL(point_cell_count)))
     ALLOCATE(point_cell_list(npoints, k), fill_index(npoints))
     fill_index = 0
-    IF (debug_heavy_io) print *, "ACD"
+    print *, "ACD"
     DO c = 1, ncells_used
       IF (.NOT. ALLOCATED(cells%cells(c)%pointindices)) CYCLE
       DO j = 1, SIZE(cells%cells(c)%pointindices)
@@ -9140,7 +8587,7 @@ CONTAINS
     rho_inf = p_inf / (R_gas * T_inf)
     q_inf = 0.5_8 * rho_inf * U_inf * U_inf
     fileunit = GET_FREE_UNIT()
-    IF (debug_heavy_io) print *, "ACD"
+    print *, "ACD"
     OPEN(unit=fileunit, file=csvfilename, status='replace', action='write', form='formatted')
     WRITE(fileunit, '(A)') 'point_index,x,y,z,pressure,Cp,dCp_dx1,dCp_dx2,dCp_dx3,dCp_dx4,dCp_dMach'
     DO pt = 1, nout
@@ -9170,989 +8617,558 @@ CONTAINS
        pointlocations(pt,2), pointlocations(pt,3), point_pressure, Cp, dCp_dx(1),&
         dCp_dx(2), dCp_dx(3), dCp_dx(4), dCp_dx(5)
     END DO
-    IF (debug_heavy_io) print *, "ACD"
+    print *, "ACD"
     CLOSE(fileunit)
     DEALLOCATE(point_cell_count, point_cell_list, fill_index)
   END SUBROUTINE OUTPUT_WALL_CP_CSV
 
-  SUBROUTINE SET_PC_HICKEN_A1(enable, sigma)
-    IMPLICIT NONE
-    LOGICAL, INTENT(IN) :: enable
-    REAL(kind=8), INTENT(IN), OPTIONAL :: sigma
-    pc_use_hicken_a1 = enable
-    IF (PRESENT(sigma)) pc_hicken_sigma = sigma
-  END SUBROUTINE SET_PC_HICKEN_A1
+	SUBROUTINE PCDBG_COMPARE_A_MV(data_4d137, cellprimitives)
+	  IMPLICIT NONE
+	  REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
+	  REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+	  INTEGER(kind=8) :: ncells, n, i, p, jc, k
+	  REAL(kind=8), ALLOCATABLE :: vv(:), av(:), mv(:), mj(:)
+	  REAL(kind=8) :: nrma, nrmerr, rel, relj, acc(5), xj(5), yi(5)
+	  REAL(kind=8) :: awork(5, 5)
+	  REAL(kind=8), PARAMETER :: tiny = 1.0d-280
+	  LOGICAL :: have_extra
+	  INTRINSIC SQRT, SUM, SIZE, DBLE, SIN
 
-  SUBROUTINE PC_BCSR_SORT_ROW_BLOCKS(ncells)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8) :: ir, i1, i2, pj, pk, itmp
-    REAL(kind=8) :: blk_a(5, 5)
-    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind)) RETURN
-    IF (.NOT. ALLOCATED(pc_blk)) RETURN
-    DO ir = 1_8, ncells
-      i1 = pc_row_ptr(ir)
-      i2 = pc_row_ptr(ir + 1_8) - 1_8
-      IF (i2 <= i1) CYCLE
-      DO pj = i1, i2 - 1_8
-        DO pk = pj + 1_8, i2
-          IF (pc_col_ind(pk) < pc_col_ind(pj)) THEN
-            itmp = pc_col_ind(pj)
-            pc_col_ind(pj) = pc_col_ind(pk)
-            pc_col_ind(pk) = itmp
-            blk_a = pc_blk(pj, :, :)
-            pc_blk(pj, :, :) = pc_blk(pk, :, :)
-            pc_blk(pk, :, :) = blk_a
-          END IF
-        END DO
-      END DO
-    END DO
-    DO ir = 1_8, ncells
-      pc_diag_pos(ir) = FIND_BLOCK_POS(ir, ir)
-    END DO
-  END SUBROUTINE PC_BCSR_SORT_ROW_BLOCKS
+	  IF (.NOT. pc_av_mv_check) RETURN
+	  IF (pc_rcm_active) THEN
+	    PRINT *, '[PC-AV-MV] skip: RCM reorder active (A 为置换后行号，vv 仍为物理单元序)'
+	    RETURN
+	  END IF
+	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_A0)) THEN
+	    PRINT *, '[PC-AV-MV] skip: pc not allocated'
+	    RETURN
+	  END IF
+	  ncells = SIZE(cellprimitives, 1)
+	  IF (SIZE(pc_row_ptr) /= ncells + 1_8) THEN
+	    PRINT *, '[PC-AV-MV] skip: ncells vs pc_row_ptr mismatch'
+	    RETURN
+	  END IF
+	  have_extra = ALLOCATED(pc_diag_extra) .AND. (SIZE(pc_diag_extra) == ncells)
+	  n = ncells*5_8
+	  ALLOCATE(vv(n), av(n), mv(n), mj(n))
+	  DO i = 1_8, ncells
+	    DO k = 1_8, 5_8
+	      vv((i - 1_8)*5_8 + k) = SIN(0.17d0*DBLE(i) + 0.031d0*DBLE(k))
+	    END DO
+	  END DO
+	  CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vv, av)
+	  mv = 0.0_8
+	  mj = 0.0_8
+	  DO i = 1_8, ncells
+	    acc = 0.0_8
+	    DO p = pc_row_ptr(i), pc_row_ptr(i + 1_8) - 1_8
+	      jc = pc_col_ind(p)
+	      xj = vv((jc - 1_8)*5_8 + 1:(jc - 1_8)*5_8 + 5_8)
+	      CALL MATVEC5(pc_A0(p, :, :), xj, yi)
+	      acc = acc + yi
+	    END DO
+	    mv((i - 1_8)*5_8 + 1:(i - 1_8)*5_8 + 5_8) = acc
+	  END DO
+	  IF (have_extra) THEN
+	    DO i = 1_8, ncells
+	      acc = 0.0_8
+	      DO p = pc_row_ptr(i), pc_row_ptr(i + 1_8) - 1_8
+		jc = pc_col_ind(p)
+		xj = vv((jc - 1_8)*5_8 + 1:(jc - 1_8)*5_8 + 5_8)
+		IF (jc == i) THEN
+		  awork = pc_A0(p, :, :)
+		  DO k = 1_8, 5_8
+		    awork(k, k) = awork(k, k) - pc_diag_extra(i)
+		  END DO
+		  CALL MATVEC5(awork, xj, yi)
+		ELSE
+		  CALL MATVEC5(pc_A0(p, :, :), xj, yi)
+		END IF
+		acc = acc + yi
+	      END DO
+	      mj((i - 1_8)*5_8 + 1:(i - 1_8)*5_8 + 5_8) = acc
+	    END DO
+	  END IF
+	  nrma = SQRT(SUM(av*av))
+	  IF (nrma < tiny) THEN
+	    PRINT *, '[PC-AV-MV] ||Av|| negligible, skip ratio'
+	    DEALLOCATE(vv, av, mv, mj)
+	    RETURN
+	  END IF
+	  nrmerr = SQRT(SUM((av - mv)*(av - mv)))
+	  rel = nrmerr/nrma
+	  PRINT *, '[PC-AV-MV] full  ||Av-M*v||/||Av|| (incl. damp+shift)=', rel, ' ||Av||=', nrma, ' ||diff||=', nrmerr
+	  IF (have_extra) THEN
+	    nrmerr = SQRT(SUM((av - mj)*(av - mj)))
+	    relj = nrmerr/nrma
+	    PRINT *, '[PC-AV-MV] Jonly||Av-M_J*v||/||Av|| (strip diag extra)=', relj, ' ||diff||=', nrmerr
+	  ELSE
+	    PRINT *, '[PC-AV-MV] Jonly skipped (pc_diag_extra missing)'
+	  END IF
+	  DEALLOCATE(vv, av, mv, mj)
+	END SUBROUTINE PCDBG_COMPARE_A_MV
 
-  SUBROUTINE BUILD_CELL_COLORING_L2(ncells, nlist, row_cnt, color, ncolor)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8), INTENT(IN) :: nlist(:, :)
-    INTEGER(kind=8), INTENT(IN) :: row_cnt(:)
-    INTEGER(kind=8), INTENT(OUT) :: color(:)
-    INTEGER(kind=8), INTENT(OUT) :: ncolor
-    INTEGER(kind=8) :: c, ii, jj, kk, n1, n2, n3, k
-    LOGICAL, ALLOCATABLE :: used(:)
-    INTEGER(kind=8), PARAMETER :: max_try = 2048_8
-    ALLOCATE(used(max_try))
-    color = 0_8
-    ncolor = 0_8
-    DO c = 1_8, ncells
-      used = .FALSE.
-      DO ii = 1_8, row_cnt(c)
-        n1 = nlist(c, ii)
-        IF (n1 >= 1_8 .AND. n1 <= ncells) THEN
-          IF (color(n1) > 0_8 .AND. color(n1) <= max_try) used(color(n1)) = .TRUE.
-        END IF
-      END DO
-      DO ii = 1_8, row_cnt(c)
-        n1 = nlist(c, ii)
-        IF (n1 < 1_8 .OR. n1 > ncells) CYCLE
-        DO jj = 1_8, row_cnt(n1)
-          n2 = nlist(n1, jj)
-          IF (n2 < 1_8 .OR. n2 > ncells) CYCLE
-          IF (color(n2) > 0_8 .AND. color(n2) <= max_try) used(color(n2)) = .TRUE.
-          DO kk = 1_8, row_cnt(n2)
-            n3 = nlist(n2, kk)
-            IF (n3 < 1_8 .OR. n3 > ncells) CYCLE
-            IF (color(n3) > 0_8 .AND. color(n3) <= max_try) used(color(n3)) = .TRUE.
-          END DO
-        END DO
-      END DO
-      k = 1_8
-      DO WHILE (k <= max_try)
-        IF (.NOT. used(k)) EXIT
-        k = k + 1_8
-      END DO
-      IF (k > max_try) k = max_try
-      color(c) = k
-      IF (k > ncolor) ncolor = k
-    END DO
-    DEALLOCATE(used)
-  END SUBROUTINE BUILD_CELL_COLORING_L2
-
-  SUBROUTINE PC_FILTER_COLORED_BLOCKS(ncells)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8) :: i, p, j, k
-    REAL(kind=8) :: ndiag, nblk, drop_th, cap_th, scl
-    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
-    IF (.NOT. ALLOCATED(pc_diag_pos)) RETURN
-    DO i = 1_8, ncells
-      p = pc_diag_pos(i)
-      IF (p <= 0_8) CYCLE
-      CALL BLOCK_INF_NORM5(pc_blk(p, :, :), ndiag)
-      ndiag = MAX(1.0d-30, ndiag)
-      drop_th = pc_colored_drop_rel * ndiag
-      cap_th = pc_colored_offdiag_cap * ndiag
-      DO j = pc_row_ptr(i), pc_row_ptr(i + 1_8) - 1_8
-        IF (pc_col_ind(j) == i) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(j, :, :), nblk)
-        IF (nblk <= drop_th) THEN
-          pc_blk(j, :, :) = 0.0_8
-        ELSEIF (nblk > cap_th) THEN
-          scl = cap_th / MAX(1.0d-30, nblk)
-          DO k = 1_8, 5_8
-            pc_blk(j, k, 1:5) = scl * pc_blk(j, k, 1:5)
-          END DO
-        END IF
-      END DO
-    END DO
-  END SUBROUTINE PC_FILTER_COLORED_BLOCKS
-
-  SUBROUTINE PC_REBALANCE_COLORED_ROWS(ncells)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8) :: i, p, j, k
-    REAL(kind=8) :: ndiag, noff, nblk, row_mag, srow
-    IF (.NOT. pc_colored_row_balance) RETURN
-    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
-    IF (.NOT. ALLOCATED(pc_diag_pos)) RETURN
-    DO i = 1_8, ncells
-      p = pc_diag_pos(i)
-      IF (p <= 0_8) CYCLE
-      CALL BLOCK_INF_NORM5(pc_blk(p, :, :), ndiag)
-      noff = 0.0_8
-      DO j = pc_row_ptr(i), pc_row_ptr(i + 1_8) - 1_8
-        IF (pc_col_ind(j) == i) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(j, :, :), nblk)
-        noff = noff + nblk
-      END DO
-      row_mag = MAX(pc_colored_row_floor, ndiag + 0.5_8 * noff)
-      srow = pc_colored_row_target / row_mag
-      DO j = pc_row_ptr(i), pc_row_ptr(i + 1_8) - 1_8
-        DO k = 1_8, 5_8
-          pc_blk(j, k, 1:5) = srow * pc_blk(j, k, 1:5)
-        END DO
-      END DO
-    END DO
-  END SUBROUTINE PC_REBALANCE_COLORED_ROWS
-
-  SUBROUTINE PC_APPLY_COLORED_SIMILARITY(ncells)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8) :: i, p, b
-    REAL(kind=8) :: rs(5), cs(5)
-    IF (.NOT. pc_colored_similarity_scale) RETURN
-    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
-    rs = (/1.0_8/MAX(pc_var_scale_p,1.0d-30), 1.0_8/MAX(pc_var_scale_t,1.0d-30), &
-   &       1.0_8/MAX(pc_var_scale_u,1.0d-30), 1.0_8/MAX(pc_var_scale_u,1.0d-30), 1.0_8/MAX(pc_var_scale_u,1.0d-30)/)
-    cs = (/pc_var_scale_p, pc_var_scale_t, pc_var_scale_u, pc_var_scale_u, pc_var_scale_u/)
-    DO i = 1_8, ncells
-      DO p = pc_row_ptr(i), pc_row_ptr(i + 1_8) - 1_8
-        DO b = 1_8, 5_8
-          pc_blk(p, b, 1:5) = rs(b) * pc_blk(p, b, 1:5)
-        END DO
-        DO b = 1_8, 5_8
-          pc_blk(p, 1:5, b) = cs(b) * pc_blk(p, 1:5, b)
-        END DO
-      END DO
-    END DO
-  END SUBROUTINE PC_APPLY_COLORED_SIMILARITY
-
-  SUBROUTINE PC_POSTPROCESS_BLK_JST_AND_FACTOR(ncells)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8) :: ii, pp, jj, i, c, p
-    REAL(kind=8) :: tinyv, ndiag, nblk, drop_th, dropped_sum, compv
-    REAL(kind=8) :: offsum, shiftv
-    REAL(kind=8) :: seed_norm, seed_blk(5, 5), seed_budget, seed_acc, seed_val
-    REAL(kind=8) :: dd_req, dd_gap
-    REAL(kind=8) :: diag_sum, diag_nrm
-    INTEGER(kind=8) :: diag_cnt
-    LOGICAL :: ok
-    LOGICAL :: okdiag
-    IF (pc_use_coarse_pv_schur .AND. (.NOT. pc_use_schur_split)) pc_use_two_level = .TRUE.
-    PRINT *, '[PC-COLOR-AD] Tapenade Jacobian -> equil / ILU'
-    IF (pc_use_equil) CALL APPLY_PC_BLOCK_EQUIL(ncells)
-    IF (pc_use_offdiag_drop) CALL PC_DAMP_OFFDIAG_TOPK(ncells)
-    IF (pc_use_drop_comp) THEN
-      tinyv = 1.0d-30
-      DO ii = 1_8, ncells
-        p = pc_diag_pos(ii)
-        IF (p <= 0_8) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(p, :, :), ndiag)
-        ndiag = MAX(ndiag, tinyv)
-        drop_th = pc_drop_rel * ndiag
-        dropped_sum = 0.0_8
-        DO pp = pc_row_ptr(ii), pc_row_ptr(ii + 1_8) - 1_8
-          jj = pc_col_ind(pp)
-          IF (jj == ii) CYCLE
-          CALL BLOCK_INF_NORM5(pc_blk(pp, :, :), nblk)
-          IF (nblk <= drop_th) dropped_sum = dropped_sum + nblk
-        END DO
-        compv = pc_drop_comp_beta * dropped_sum
-        IF (compv > 0.0_8) THEN
-          DO i = 1_8, 5_8
-            pc_blk(p, i, i) = pc_blk(p, i, i) + compv
-          END DO
-        END IF
-      END DO
-    END IF
-    DO c = 1_8, ncells
-      p = pc_diag_pos(c)
-      IF (p > 0_8) THEN
-        pc_blk(p, 1, 1) = pc_blk(p, 1, 1) + pc_diag_eps
-        pc_blk(p, 2, 2) = pc_blk(p, 2, 2) + pc_diag_eps
-        pc_blk(p, 3, 3) = pc_blk(p, 3, 3) + pc_diag_eps
-        pc_blk(p, 4, 4) = pc_blk(p, 4, 4) + pc_diag_eps
-        pc_blk(p, 5, 5) = pc_blk(p, 5, 5) + pc_diag_eps
-      END IF
-    END DO
-    DO ii = 1_8, ncells
-      p = pc_diag_pos(ii)
-      IF (p <= 0_8) CYCLE
-      CALL BLOCK_INF_NORM5(pc_blk(p, :, :), ndiag)
-      seed_blk = pc_blk(p, :, :)
-      CALL BLOCK_INF_NORM5(seed_blk, seed_norm)
-      IF (seed_norm > 1.0d-30) THEN
-        seed_blk = seed_blk / seed_norm
-      ELSE
-        seed_blk = 0.0_8
-        DO i = 1_8, 5_8
-          seed_blk(i, i) = 1.0_8
-        END DO
-      END IF
-      seed_budget = MAX(1.0d-18, 1.0d-4 * ndiag)
-      seed_acc = 0.0_8
-      DO pp = pc_row_ptr(ii), pc_row_ptr(ii + 1_8) - 1_8
-        jj = pc_col_ind(pp)
-        IF (jj == ii) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(pp, :, :), nblk)
-        IF (nblk <= 1.0d-30) THEN
-          seed_val = MIN(1.0d-10 * MAX(1.0d0, ndiag), seed_budget - seed_acc)
-          IF (seed_val <= 0.0_8) EXIT
-          pc_blk(pp, :, :) = pc_blk(pp, :, :) - seed_val * seed_blk
-          pc_blk(p, :, :) = pc_blk(p, :, :) + seed_val * seed_blk
-          seed_acc = seed_acc + seed_val
-        END IF
-      END DO
-    END DO
-    DO ii = 1_8, ncells
-      p = pc_diag_pos(ii)
-      IF (p <= 0_8) CYCLE
-      CALL BLOCK_INF_NORM5(pc_blk(p, :, :), ndiag)
-      offsum = 0.0_8
-      DO pp = pc_row_ptr(ii), pc_row_ptr(ii + 1_8) - 1_8
-        jj = pc_col_ind(pp)
-        IF (jj == ii) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(pp, :, :), nblk)
-        offsum = offsum + nblk
-      END DO
-      IF (pc_matrix_from_colored_ad) THEN
-        dd_req = pc_colored_dd_frac * offsum
-      ELSE
-        dd_req = 0.15d0 * offsum
-      END IF
-      dd_gap = dd_req - ndiag
-      IF (dd_gap > 0.0_8) THEN
-        DO i = 1_8, 5_8
-          pc_blk(p, i, i) = pc_blk(p, i, i) + dd_gap
-        END DO
-      END IF
-    END DO
-    IF (pc_matrix_from_colored_ad) THEN
-      DO ii = 1_8, ncells
-        p = pc_diag_pos(ii)
-        IF (p <= 0_8) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(p, :, :), ndiag)
-        shiftv = pc_colored_diag_stab * MAX(1.0_8, ndiag)
-        DO i = 1_8, 5_8
-          pc_blk(p, i, i) = pc_blk(p, i, i) + shiftv
-        END DO
-      END DO
-    END IF
-    IF (pc_use_ilut_lite) THEN
-      CALL BUILD_ILUT_PATTERN_LITE(ncells)
-      DO c = 1_8, ncells
-        pc_diag_pos(c) = FIND_BLOCK_POS(c, c)
-      END DO
-      PRINT *, '[PC] ILUT-lite pattern enriched, extra/row=', pc_ilut_extra_per_row
-    END IF
-    IF (pc_use_shifted_ilu) THEN
-      DO ii = 1_8, ncells
-        p = pc_diag_pos(ii)
-        IF (p <= 0_8) CYCLE
-        offsum = 0.0_8
-        DO pp = pc_row_ptr(ii), pc_row_ptr(ii + 1_8) - 1_8
-          jj = pc_col_ind(pp)
-          IF (jj == ii) CYCLE
-          CALL BLOCK_INF_NORM5(pc_blk(pp, :, :), nblk)
-          offsum = offsum + nblk
-        END DO
-        shiftv = pc_shift_alpha * offsum
-        IF (shiftv > 0.0_8) THEN
-          DO i = 1_8, 5_8
-            pc_blk(p, i, i) = pc_blk(p, i, i) + shiftv
-          END DO
-        END IF
-      END DO
-    END IF
-    IF (pc_use_targeted_boost) CALL PC_TARGETED_DIAG_BOOST(ncells)
-    IF (pc_use_gersh_shift) CALL PC_ENFORCE_BLOCK_GERSH_SHIFT(ncells)
-    IF (ALLOCATED(pc_a0_blk)) DEALLOCATE(pc_a0_blk)
-    ALLOCATE(pc_a0_blk(SIZE(pc_blk, 1), 5, 5))
-    pc_a0_blk = pc_blk
-    pc_a0_ready = .TRUE.
-    IF (ALLOCATED(pc_diag_inv)) DEALLOCATE(pc_diag_inv)
-    ALLOCATE(pc_diag_inv(ncells,5,5))
-    pc_diag_inv = 0.0_8
-    DO c = 1_8, ncells
-      p = pc_diag_pos(c)
-      IF (p > 0_8) THEN
-        CALL INVERT_5X5(pc_a0_blk(p,:,:), pc_diag_inv(c,:,:), okdiag)
-        IF (.NOT. okdiag) THEN
-          pc_diag_inv(c,:,:) = 0.0_8
-          DO i = 1_8, 5_8
-            pc_diag_inv(c,i,i) = 1.0_8 / MAX(ABS(pc_a0_blk(p,i,i)), 1.0d-12)
-          END DO
-        END IF
-      ELSE
-        DO i = 1_8, 5_8
-          pc_diag_inv(c,i,i) = 1.0_8
-        END DO
-      END IF
-    END DO
-    diag_sum = 0.0_8
-    diag_cnt = 0_8
-    DO c = 1_8, ncells
-      p = pc_diag_pos(c)
-      IF (p <= 0_8) CYCLE
-      CALL BLOCK_INF_NORM5(pc_a0_blk(p, :, :), diag_nrm)
-      diag_sum = diag_sum + diag_nrm
-      diag_cnt = diag_cnt + 1_8
-    END DO
-    IF (diag_cnt > 0_8) THEN
-      pc_a0_diag_mean = diag_sum / REAL(diag_cnt, kind=8)
-    ELSE
-      pc_a0_diag_mean = 1.0_8
-    END IF
-    PRINT *, '[PC-A0] backup ready, nnzb=', SIZE(pc_a0_blk, 1)
-    CALL FACTOR_BLOCK_ILU0(ncells, ok)
-    IF (.NOT. ok) THEN
-      PRINT *, '[PC] block-ILU factor failed'
-      pc_ready = .FALSE.
-      pc_sp_ready = .FALSE.
-      pc_a0_ready = .FALSE.
-    ELSE
-      pc_ncells = ncells
-      pc_ready = .TRUE.
-      IF (pc_use_pschur .OR. pc_use_schur_split) THEN
-        CALL PC_BUILD_PRESSURE_SCHUR_STRONG(ncells)
-      ELSE
-        pc_sp_ready = .FALSE.
-      END IF
-      IF (pc_use_schur_split .AND. pc_sp_ready) THEN
-        CALL PC_BUILD_SCHUR_SPLIT_DATA(ncells)
-      ELSE
-        IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
-      END IF
-      PRINT *, '[PC-SCHUR] pschur=', pc_use_pschur, ' split=', pc_use_schur_split, ' sp_ready=', pc_sp_ready
-    END IF
-    IF (pc_ready .AND. pc_use_two_level) THEN
-      CALL PC_BUILD_COARSE_AGG(ncells)
-    ELSE
-      pc_coarse_ready = .FALSE.
-    END IF
-    IF (.NOT. pc_use_asm_subdomain_ilu) THEN
-      CALL PC_ASM_RELEASE
-    ELSE IF (pc_ready .AND. pc_a0_ready) THEN
-      CALL PC_ASM_BUILD_FROM_A0(ncells)
-    END IF
-  END SUBROUTINE PC_POSTPROCESS_BLK_JST_AND_FACTOR
-
-  SUBROUTINE BUILD_PC_AD_FULL_STENCIL_AD(data_4d137, cellprimitives, ncells)
+  ! 打印单元 cell_id 的对角 5×5：A1(Hicken-PC 组装) 与 Full-JST J（无 Hicken），供与物理量级对照
+  SUBROUTINE PCDBG_PRINT_CELL_DIAG_JAC5X5(data_4d137, cellprimitives, cell_id)
     IMPLICIT NONE
     REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
     REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8) :: c, mvar, rcell, k, ih, p, nnzb, i, i1, i2
+    INTEGER(kind=8), INTENT(IN) :: cell_id
+    INTEGER(kind=8) :: ncells, mvar, rvar, p
+    REAL(kind=8) :: A1(5, 5), AJ(5, 5), data_4d137d(1, 4), fdiff, fnrm, relf
     REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
-    REAL(kind=8) :: data_4d137d(1, 4), row_sum
-    LOGICAL, ALLOCATABLE :: mark(:)
-    INTEGER(kind=8), ALLOCATABLE :: deg_r(:), fill_cnt(:)
-    INTEGER(kind=8) :: nhit
-    TYPE :: PC_COLNZ_T
-      INTEGER(kind=8), ALLOCATABLE :: rows(:)
-      INTEGER(kind=8) :: nr
-    END TYPE
-    TYPE(PC_COLNZ_T), ALLOCATABLE :: colst(:)
-    INTEGER(kind=8), ALLOCATABLE :: nlist(:, :), row_cnt(:)
-    INTEGER(kind=8) :: maxdeg, t
-    IF (ncells /= SIZE(cellprimitives, 1)) RETURN
-    PRINT *, '######## [PC-AD-FULL] 開始組裝 full stencil Jacobian，ncells=', ncells, ' ########'
-    ALLOCATE(colst(ncells), mark(ncells), cellprimitivesd(ncells, 5))
-    data_4d137d = 0.0_8
-    DO c = 1_8, ncells
-      colst(c)%nr = 0_8
-      mark = .FALSE.
-      mark(c) = .TRUE.
-      DO mvar = 1_8, 5_8
-        cellprimitivesd = 0.0_8
-        cellprimitivesd(c, mvar) = 1.0_8
-        CALL SET_PC_HICKEN_A1(pc_use_hicken_a1, pc_hicken_sigma)
-        CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
-        CALL SET_PC_HICKEN_A1(.FALSE.)
-        DO rcell = 1_8, ncells
-          row_sum = SUM(ABS(fluxresiduals_slnd(rcell, 1:5)))
-          IF (row_sum > pc_pattern_drop_tol) mark(rcell) = .TRUE.
-        END DO
-      END DO
-      nhit = 0_8
-      DO rcell = 1_8, ncells
-        IF (mark(rcell)) nhit = nhit + 1_8
-      END DO
-      ALLOCATE(colst(c)%rows(nhit))
-      ih = 0_8
-      DO rcell = 1_8, ncells
-        IF (mark(rcell)) THEN
-          ih = ih + 1_8
-          colst(c)%rows(ih) = rcell
-        END IF
-      END DO
-      colst(c)%nr = nhit
-    END DO
-    IF (ALLOCATED(pc_row_ptr)) DEALLOCATE(pc_row_ptr)
-    IF (ALLOCATED(pc_col_ind)) DEALLOCATE(pc_col_ind)
-    IF (ALLOCATED(pc_blk)) DEALLOCATE(pc_blk)
-    IF (ALLOCATED(pc_uinv)) DEALLOCATE(pc_uinv)
-    IF (ALLOCATED(pc_diag_pos)) DEALLOCATE(pc_diag_pos)
-    ALLOCATE(pc_row_ptr(ncells + 1_8), deg_r(ncells), fill_cnt(ncells))
-    deg_r = 0_8
-    DO c = 1_8, ncells
-      DO k = 1_8, colst(c)%nr
-        rcell = colst(c)%rows(k)
-        deg_r(rcell) = deg_r(rcell) + 1_8
-      END DO
-    END DO
-    pc_row_ptr(1) = 1_8
-    DO i = 1_8, ncells
-      pc_row_ptr(i + 1_8) = pc_row_ptr(i) + deg_r(i)
-    END DO
-    nnzb = pc_row_ptr(ncells + 1_8) - 1_8
-    ALLOCATE(pc_col_ind(nnzb), pc_blk(nnzb, 5, 5), pc_uinv(ncells, 5, 5), pc_diag_pos(ncells))
-    pc_blk = 0.0_8
-    pc_uinv = 0.0_8
-    pc_diag_pos = 0_8
-    fill_cnt = 0_8
-    DO c = 1_8, ncells
-      DO k = 1_8, colst(c)%nr
-        rcell = colst(c)%rows(k)
-        p = pc_row_ptr(rcell) + fill_cnt(rcell)
-        pc_col_ind(p) = c
-        fill_cnt(rcell) = fill_cnt(rcell) + 1_8
-      END DO
-    END DO
-    DO i = 1_8, ncells
-      i1 = pc_row_ptr(i)
-      i2 = pc_row_ptr(i + 1_8) - 1_8
-      IF (i2 > i1) CALL PC_SORT_INSERT_I8(pc_col_ind, i1, i2)
-    END DO
-    DO c = 1_8, ncells
-      pc_diag_pos(c) = FIND_BLOCK_POS(c, c)
-    END DO
-    DO c = 1_8, ncells
-      DO mvar = 1_8, 5_8
-        cellprimitivesd = 0.0_8
-        cellprimitivesd(c, mvar) = 1.0_8
-        CALL SET_PC_HICKEN_A1(pc_use_hicken_a1, pc_hicken_sigma)
-        CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
-        CALL SET_PC_HICKEN_A1(.FALSE.)
-        DO k = 1_8, colst(c)%nr
-          rcell = colst(c)%rows(k)
-          p = FIND_BLOCK_POS(rcell, c)
-          IF (p > 0_8) THEN
-            DO ih = 1_8, 5_8
-              pc_blk(p, ih, mvar) = fluxresiduals_slnd(rcell, ih)
-            END DO
-          END IF
-        END DO
-      END DO
-    END DO
-    DO c = 1_8, ncells
-      IF (ALLOCATED(colst(c)%rows)) DEALLOCATE(colst(c)%rows)
-    END DO
-    DEALLOCATE(colst, mark, deg_r, fill_cnt, cellprimitivesd)
-    maxdeg = 1_8
-    DO c = 1_8, ncells
-      maxdeg = MAX(maxdeg, pc_row_ptr(c + 1_8) - pc_row_ptr(c))
-    END DO
-    ALLOCATE(nlist(ncells, maxdeg), row_cnt(ncells))
-    DO c = 1_8, ncells
-      t = 0_8
-      DO p = pc_row_ptr(c), pc_row_ptr(c + 1_8) - 1_8
-        t = t + 1_8
-        nlist(c, t) = pc_col_ind(p)
-      END DO
-      row_cnt(c) = t
-    END DO
-    CALL PC_BUILD_RCM_ORDER(ncells, nlist, row_cnt)
-    DEALLOCATE(nlist, row_cnt)
-    PRINT *, '[PC-AD] full stencil nnzb=', nnzb
-    ! 全模板矩陣非著色 L1 路徑；後續 POSTPROCESS 用非著色分支加強對角
-    pc_matrix_from_colored_ad = .FALSE.
-  END SUBROUTINE BUILD_PC_AD_FULL_STENCIL_AD
+    LOGICAL :: hsave
+    INTRINSIC SIZE, SQRT, SUM, MAX
 
-  SUBROUTINE BUILD_PC_AD_PATTERN_ONLY(data_4d137, cellprimitives, ncells)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    TYPE :: PC_COLNZ_T
-      INTEGER(kind=8), ALLOCATABLE :: rows(:)
-      INTEGER(kind=8) :: nr
-    END TYPE
-    TYPE(PC_COLNZ_T), ALLOCATABLE :: colst(:)
-    REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
-    REAL(kind=8) :: data_4d137d(1,4), row_sum
-    LOGICAL, ALLOCATABLE :: mark(:)
-    INTEGER(kind=8) :: c, mvar, rcell, nhit, ih, k, nnz
-
-    ALLOCATE(colst(ncells), mark(ncells), cellprimitivesd(ncells,5))
-    data_4d137d = 0.0_8
-
-    DO c = 1_8, ncells
-      colst(c)%nr = 0_8
-      mark = .FALSE.
-      mark(c) = .TRUE.
-      DO mvar = 1_8, 5_8
-        cellprimitivesd = 0.0_8
-        cellprimitivesd(c,mvar) = 1.0_8
-        CALL SET_PC_HICKEN_A1(pc_use_hicken_a1, pc_hicken_sigma)
-        CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
-        CALL SET_PC_HICKEN_A1(.FALSE.)
-        DO rcell = 1_8, ncells
-          row_sum = SUM(ABS(fluxresiduals_slnd(rcell,1:5)))
-          IF (row_sum > pc_pattern_drop_tol) mark(rcell) = .TRUE.
-        END DO
-      END DO
-      nhit = 0_8
-      DO rcell = 1_8, ncells
-        IF (mark(rcell)) nhit = nhit + 1_8
-      END DO
-      ALLOCATE(colst(c)%rows(nhit))
-      ih = 0_8
-      DO rcell = 1_8, ncells
-        IF (mark(rcell)) THEN
-          ih = ih + 1_8
-          colst(c)%rows(ih) = rcell
-        END IF
-      END DO
-      colst(c)%nr = nhit
-    END DO
-    CALL SET_PC_HICKEN_A1(.FALSE.)
-
-    IF (ALLOCATED(pc_cached_col_ptr)) DEALLOCATE(pc_cached_col_ptr)
-    ALLOCATE(pc_cached_col_ptr(ncells+1_8))
-    pc_cached_col_ptr(1) = 1_8
-    DO c = 1_8, ncells
-      pc_cached_col_ptr(c+1_8) = pc_cached_col_ptr(c) + colst(c)%nr
-    END DO
-    nnz = pc_cached_col_ptr(ncells+1_8) - 1_8
-    IF (ALLOCATED(pc_cached_row_ind)) DEALLOCATE(pc_cached_row_ind)
-    ALLOCATE(pc_cached_row_ind(nnz))
-    DO c = 1_8, ncells
-      DO k = 1_8, colst(c)%nr
-        pc_cached_row_ind(pc_cached_col_ptr(c)+k-1_8) = colst(c)%rows(k)
-      END DO
-    END DO
-    pc_full_ad_pattern_ready = .TRUE.
-    PRINT *, '[PC-PATTERN] full-AD pattern cached, nnz=', nnz
-
-    DO c = 1_8, ncells
-      IF (ALLOCATED(colst(c)%rows)) DEALLOCATE(colst(c)%rows)
-    END DO
-    DEALLOCATE(colst, mark, cellprimitivesd)
-  END SUBROUTINE BUILD_PC_AD_PATTERN_ONLY
-
-  SUBROUTINE BUILD_PC_MATRIX_COLORED_AD(data_4d137, cellprimitives)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    INTEGER(kind=8) :: ncells, nfaces, nbdryfaces, f, c, j, nnzb, p
-    INTEGER(kind=8) :: lvl, slot, nb, t
-    INTEGER(kind=8) :: max_row_len
-    INTEGER(kind=8), ALLOCATABLE :: deg(:), fill(:), nlist(:, :), row_cnt(:)
-    INTEGER(kind=8), ALLOCATABLE :: color(:)
-    INTEGER(kind=8) :: ncolor, icolor, mvar, rcell, rvar
-    INTEGER(kind=8) :: nsamp, s, idx, cc, nsamp_colors
-    INTEGER(kind=8), ALLOCATABLE :: samp_cells(:), seen_color(:)
-    REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
-    REAL(kind=8), ALLOCATABLE :: rhs_chk(:), z_chk(:), az_chk(:), r_chk(:)
-    REAL(kind=8) :: diff2, ref2, rel_color_err, minv_rel, rmax, zmax, rloc
-    INTEGER(kind=8) :: worst_cell
-    REAL(kind=8) :: data_4d137d(1, 4)
-    REAL(kind=8) :: sigma_hicken_pc
-    LOGICAL :: use_hicken_pc
-    LOGICAL :: refresh_needed
-    INTEGER(kind=8) :: meshinfo(4), ownercell, neighbourcell
     ncells = SIZE(cellprimitives, 1)
-    pc_matrix_from_colored_ad = .TRUE.
-    IF (.NOT. ALLOCATED(eps22) .OR. .NOT. ALLOCATED(eps44)) THEN
-      PRINT *, '[PC-ABORT] BUILD_PC_MATRIX_COLORED_AD: eps22/eps44 未分配，无法组装着色/全模板 AD 预条件'
-      pc_ready = .FALSE.
-      pc_matrix_from_colored_ad = .FALSE.
-      RETURN
-    END IF
-    IF (.NOT. ALLOCATED(cvols_mesh) .OR. .NOT. ALLOCATED(favecs_mesh) .OR. .NOT. ALLOCATED(faces_mesh)) THEN
-      PRINT *, '[PC-ABORT] BUILD_PC_MATRIX_COLORED_AD: cvols_mesh/favecs_mesh/faces_mesh 未分配'
-      pc_ready = .FALSE.
-      pc_matrix_from_colored_ad = .FALSE.
-      RETURN
-    END IF
-    CALL UNSTRUCTUREDMESHINFO(meshinfo)
-    nfaces = meshinfo(2)
-    nbdryfaces = meshinfo(4)
-    use_hicken_pc = pc_use_hicken_a1
-    sigma_hicken_pc = pc_hicken_sigma
-    IF (pc_colored_stable_mode .AND. pc_colored_force_hicken) THEN
-      use_hicken_pc = .TRUE.
-      sigma_hicken_pc = pc_colored_hicken_sigma
-    END IF
-    PRINT *, '[PC-ROUTE] 着色 AD + L1 窄模板预条件构建', &
-      & ' stable_mode=', pc_colored_stable_mode, ' hicken=', use_hicken_pc, &
-      & ' sigma=', sigma_hicken_pc, ' res_conn_level=', pc_res_conn_level
-    refresh_needed = .FALSE.
-    IF (pc_use_full_ad_pattern_refresh) THEN
-      refresh_needed = (.NOT. pc_full_ad_pattern_ready)
-      IF (pc_full_ad_pattern_period > 0_8) THEN
-        refresh_needed = refresh_needed .OR. (MOD(pc_build_calls, pc_full_ad_pattern_period) == 0_8)
-      END IF
-      IF (refresh_needed) CALL BUILD_PC_AD_PATTERN_ONLY(data_4d137, cellprimitives, ncells)
-    END IF
-
-    IF (pc_use_full_ad_pattern_refresh .AND. pc_full_ad_pattern_ready .AND. &
-        ALLOCATED(pc_cached_col_ptr) .AND. ALLOCATED(pc_cached_row_ind)) THEN
-      ALLOCATE(row_cnt(ncells))
-      row_cnt = 0_8
-      max_row_len = 1_8
-      DO c = 1_8, ncells
-        row_cnt(c) = pc_cached_col_ptr(c+1_8) - pc_cached_col_ptr(c)
-        max_row_len = MAX(max_row_len, row_cnt(c))
-      END DO
-      ALLOCATE(nlist(ncells, max_row_len))
-      nlist = 0_8
-      DO c = 1_8, ncells
-        DO j = 1_8, row_cnt(c)
-          nlist(c,j) = pc_cached_row_ind(pc_cached_col_ptr(c)+j-1_8)
-        END DO
-        CALL SORT_UNIQUE_I8(nlist(c,1:row_cnt(c)), row_cnt(c))
-      END DO
-      PRINT *, '[PC-PATTERN] use cached full-AD sparsity'
-    ELSE
-      ALLOCATE(deg(ncells))
-      deg = 0_8
-      DO c = 1_8, ncells
-        deg(c) = 1_8
-      END DO
-      DO f = 1_8, nfaces - nbdryfaces
-        ownercell = faces_mesh(f, 1)
-        neighbourcell = faces_mesh(f, 2)
-        IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
-        IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
-        deg(ownercell) = deg(ownercell) + 1_8
-        deg(neighbourcell) = deg(neighbourcell) + 1_8
-      END DO
-      ALLOCATE(nlist(ncells, MAXVAL(deg) * MAX(1_8, pc_res_conn_level)))
-      nlist = 0_8
-      ALLOCATE(fill(ncells))
-      fill = 0_8
-      DO c = 1_8, ncells
-        fill(c) = 1_8
-        nlist(c, 1) = c
-      END DO
-      DO f = 1_8, nfaces - nbdryfaces
-        ownercell = faces_mesh(f, 1)
-        neighbourcell = faces_mesh(f, 2)
-        IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
-        IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
-        fill(ownercell) = fill(ownercell) + 1_8
-        nlist(ownercell, fill(ownercell)) = neighbourcell
-        fill(neighbourcell) = fill(neighbourcell) + 1_8
-        nlist(neighbourcell, fill(neighbourcell)) = ownercell
-      END DO
-      IF (pc_res_conn_level > 1_8) THEN
-        DO lvl = 2_8, pc_res_conn_level
-          DO c = 1_8, ncells
-            slot = fill(c)
-            DO j = 2_8, fill(c)
-              nb = nlist(c, j)
-              IF (nb < 1_8 .OR. nb > ncells .OR. nb == c) CYCLE
-              DO t = 2_8, fill(nb)
-                IF (slot >= SIZE(nlist,2,kind=8)) EXIT
-                IF (nlist(nb, t) < 1_8 .OR. nlist(nb, t) > ncells) CYCLE
-                IF (nlist(nb, t) == c) CYCLE
-                slot = slot + 1_8
-                nlist(c, slot) = nlist(nb, t)
-              END DO
-            END DO
-            fill(c) = MIN(slot, SIZE(nlist,2,kind=8))
-          END DO
-        END DO
-      END IF
-      ALLOCATE(row_cnt(ncells))
-      DO c = 1_8, ncells
-        CALL SORT_UNIQUE_I8(nlist(c, 1:fill(c)), row_cnt(c))
-      END DO
-      DO c = 1_8, ncells
-        CALL SORT_UNIQUE_I8(nlist(c, 1:fill(c)), row_cnt(c))
-      END DO
-    END IF
-    CALL PC_BUILD_RCM_ORDER(ncells, nlist, row_cnt)
-    IF (ALLOCATED(pc_row_ptr)) DEALLOCATE(pc_row_ptr)
-    ALLOCATE(pc_row_ptr(ncells + 1_8))
-    pc_row_ptr(1) = 1_8
-    DO c = 1_8, ncells
-      pc_row_ptr(c + 1_8) = pc_row_ptr(c) + row_cnt(c)
+    IF (cell_id < 1_8 .OR. cell_id > ncells) RETURN
+    IF (.NOT. ALLOCATED(pc_diag_pos) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+    p = pc_diag_pos(cell_id)
+    IF (p <= 0_8) RETURN
+    A1 = pc_blk(p, :, :)
+    PRINT *, '[PC-JAC-5x5] w = (P,T,Ux,Uy,Uz) same order as cellPrimitives'
+    PRINT *, '[PC-JAC-5x5] block (r,c) = d(R_cell eq r) / d(w_cell var c)'
+    PRINT *, '[PC-JAC-5x5] cell=', cell_id, ' w=', cellprimitives(cell_id, 1:5)
+    PRINT *, '[PC-JAC-5x5] 对角块 A1(Hicken-PC 组装) ∂R_cell/∂w_cell:'
+    DO rvar = 1_8, 5_8
+      PRINT *, ' [A1] ', A1(rvar, 1), A1(rvar, 2), A1(rvar, 3), A1(rvar, 4), A1(rvar, 5)
     END DO
-    nnzb = pc_row_ptr(ncells + 1_8) - 1_8
-    IF (ALLOCATED(pc_col_ind)) DEALLOCATE(pc_col_ind)
-    IF (ALLOCATED(pc_blk)) DEALLOCATE(pc_blk)
-    IF (ALLOCATED(pc_uinv)) DEALLOCATE(pc_uinv)
-    IF (ALLOCATED(pc_diag_pos)) DEALLOCATE(pc_diag_pos)
-    ALLOCATE(pc_col_ind(nnzb), pc_blk(nnzb, 5, 5), pc_uinv(ncells, 5, 5), pc_diag_pos(ncells))
-    pc_blk = 0.0_8
-    pc_uinv = 0.0_8
-    pc_diag_pos = 0_8
-    p = 1_8
-    DO c = 1_8, ncells
-      DO j = 1_8, row_cnt(c)
-        pc_col_ind(p) = nlist(c, j)
-        IF (pc_col_ind(p) == c) pc_diag_pos(c) = p
-        p = p + 1_8
-      END DO
-    END DO
-    ALLOCATE(color(ncells))
-    CALL BUILD_CELL_COLORING_L2(ncells, nlist, row_cnt, color, ncolor)
-    PRINT *, '[PC-COLOR-AD] ncolors=', ncolor, ' nnzb=', nnzb
+    hsave = pc_use_hicken_a1
     ALLOCATE(cellprimitivesd(ncells, 5))
     data_4d137d = 0.0_8
-    DO icolor = 1_8, ncolor
+    CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+    CALL SET_PC_HICKEN_A1(.FALSE.)
+    DO mvar = 1_8, 5_8
+      cellprimitivesd = 0.0_8
+      cellprimitivesd(cell_id, mvar) = 1.0_8
+      CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
+      DO rvar = 1_8, 5_8
+        AJ(rvar, mvar) = fluxresiduals_slnd(cell_id, rvar)
+      END DO
+    END DO
+    CALL SET_PC_HICKEN_A1(hsave)
+    DEALLOCATE(cellprimitivesd)
+    PRINT *, '[PC-JAC-5x5] 对角块 J(Full-JST, Krylov 路径) ∂R_cell/∂w_cell:'
+    DO rvar = 1_8, 5_8
+      PRINT *, ' [J ] ', AJ(rvar, 1), AJ(rvar, 2), AJ(rvar, 3), AJ(rvar, 4), AJ(rvar, 5)
+    END DO
+    fdiff = 0.0_8
+    fnrm = 0.0_8
+    DO rvar = 1_8, 5_8
       DO mvar = 1_8, 5_8
-        cellprimitivesd = 0.0_8
-        DO c = 1_8, ncells
-          IF (color(c) == icolor) cellprimitivesd(c, mvar) = 1.0_8
-        END DO
-        CALL SET_PC_HICKEN_A1(use_hicken_pc, sigma_hicken_pc)
-        CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
-        CALL SET_PC_HICKEN_A1(.FALSE.)
-        DO c = 1_8, ncells
-          IF (color(c) /= icolor) CYCLE
-          DO j = 1_8, row_cnt(c)
-            rcell = nlist(c, j)
-            IF (rcell < 1_8 .OR. rcell > ncells) CYCLE
-            p = FIND_BLOCK_POS(rcell, c)
-            IF (p <= 0_8) CYCLE
-            DO rvar = 1_8, 5_8
-              pc_blk(p, rvar, mvar) = fluxresiduals_slnd(rcell, rvar)
-            END DO
-          END DO
+        fdiff = fdiff + (A1(rvar, mvar) - AJ(rvar, mvar))**2
+        fnrm = fnrm + AJ(rvar, mvar)**2
+      END DO
+    END DO
+    relf = SQRT(fdiff) / MAX(SQRT(fnrm), 1.0d-30)
+    PRINT *, '[PC-JAC-5x5] relFrob(A1-J)/||J||_F=', relf
+    PRINT *, '[PC-JAC-5x5] tip: ideal gas d(rho)/dP, d(rho)/dT have analytic forms'
+    PRINT *, '[PC-JAC-5x5] tip: momentum-velocity coupling scales with Ma, rho'
+    PRINT *, '[PC-JAC-5x5] tip: large A1-J -> Hicken A1+dissipation; NaN -> check R,BC'
+  END SUBROUTINE PCDBG_PRINT_CELL_DIAG_JAC5X5
+
+  SUBROUTINE PC_ROW_COL_SORT_BCSR(ncells, row_ptr, col_ind, blk)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: ncells
+    INTEGER(kind=8), INTENT(IN) :: row_ptr(ncells + 1)
+    INTEGER(kind=8), INTENT(INOUT) :: col_ind(:)
+    REAL(kind=8), INTENT(INOUT) :: blk(:, :, :)
+    INTEGER(kind=8) :: i, p, q, p0, p1, jc, kc
+    REAL(kind=8) :: tb(5, 5)
+    INTRINSIC MIN
+    DO i = 1_8, ncells
+      p0 = row_ptr(i)
+      p1 = row_ptr(i + 1) - 1_8
+      DO p = p0, p1
+        DO q = p + 1_8, p1
+          IF (col_ind(q) < col_ind(p)) THEN
+            jc = col_ind(p)
+            col_ind(p) = col_ind(q)
+            col_ind(q) = jc
+            tb = blk(p, :, :)
+            blk(p, :, :) = blk(q, :, :)
+            blk(q, :, :) = tb
+          END IF
         END DO
       END DO
     END DO
-    IF (pc_check_color_interference_once) THEN
-      nsamp = MIN(3_8, ncolor)
-      ALLOCATE(samp_cells(nsamp), seen_color(nsamp))
-      samp_cells = 0_8
-      seen_color = 0_8
-      nsamp_colors = 0_8
-      DO cc = 1_8, ncells
-        IF (nsamp_colors >= nsamp) EXIT
-        IF (color(cc) < 1_8) CYCLE
-        DO s = 1_8, nsamp_colors
-          IF (seen_color(s) == color(cc)) EXIT
+  END SUBROUTINE PC_ROW_COL_SORT_BCSR
+
+  SUBROUTINE PC_RCM_SYMMETRIC_BCSR(ncells, row_ptr, col_ind, perm, inv_perm, ok)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: ncells
+    INTEGER(kind=8), INTENT(IN) :: row_ptr(ncells + 1), col_ind(:)
+    INTEGER(kind=8), INTENT(OUT) :: perm(ncells), inv_perm(ncells)
+    LOGICAL, INTENT(OUT) :: ok
+    INTEGER(kind=8), ALLOCATABLE :: deg(:), Lcur(:), Lnx(:), order(:)
+    LOGICAL, ALLOCATABLE :: visit(:)
+    INTEGER(kind=8) :: nL, nL2, nout, i, u, v, p, a, b, s, dmin, ii, jj, tmpi, nmax_layer
+    INTEGER(kind=8) :: ierr
+    INTRINSIC MAX
+    ok = .FALSE.
+    IF (ncells < 1_8) RETURN
+    ALLOCATE(deg(ncells), Lcur(ncells), Lnx(ncells), order(ncells), visit(ncells), STAT=ierr)
+    IF (ierr /= 0) RETURN
+    deg = 0_8
+    DO i = 1_8, ncells
+      DO p = row_ptr(i), row_ptr(i + 1) - 1_8
+        v = col_ind(p)
+        IF (v /= i) deg(i) = deg(i) + 1_8
+      END DO
+    END DO
+    dmin = HUGE(1_8)
+    s = 1_8
+    DO i = 1_8, ncells
+      IF (deg(i) < dmin) THEN
+        dmin = deg(i)
+        s = i
+      END IF
+    END DO
+    visit = .FALSE.
+    nL = 1_8
+    Lcur(1) = s
+    visit(s) = .TRUE.
+    nout = 0_8
+    nmax_layer = ncells + 10_8
+    DO WHILE (nL > 0_8)
+      DO ii = 1_8, nL - 1_8
+        DO jj = ii + 1_8, nL
+          IF (deg(Lcur(jj)) < deg(Lcur(ii))) THEN
+            tmpi = Lcur(ii)
+            Lcur(ii) = Lcur(jj)
+            Lcur(jj) = tmpi
+          END IF
         END DO
-        IF (s <= nsamp_colors) CYCLE
-        nsamp_colors = nsamp_colors + 1_8
-        seen_color(nsamp_colors) = color(cc)
-        samp_cells(nsamp_colors) = cc
       END DO
-      diff2 = 0.0_8
-      ref2 = 0.0_8
-      DO idx = 1_8, nsamp_colors
-        cc = samp_cells(idx)
-        IF (cc < 1_8) CYCLE
-        DO mvar = 1_8, 5_8
-          cellprimitivesd = 0.0_8
-          cellprimitivesd(cc, mvar) = 1.0_8
-          CALL SET_PC_HICKEN_A1(use_hicken_pc, sigma_hicken_pc)
-          CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
-          CALL SET_PC_HICKEN_A1(.FALSE.)
-          DO j = 1_8, row_cnt(cc)
-            rcell = nlist(cc, j)
-            IF (rcell < 1_8 .OR. rcell > ncells) CYCLE
-            p = FIND_BLOCK_POS(rcell, cc)
-            IF (p <= 0_8) CYCLE
-            DO rvar = 1_8, 5_8
-              diff2 = diff2 + (pc_blk(p, rvar, mvar) - fluxresiduals_slnd(rcell, rvar))**2
-              ref2 = ref2 + fluxresiduals_slnd(rcell, rvar)**2
-            END DO
-          END DO
+      DO ii = 1_8, nL
+        nout = nout + 1_8
+        order(nout) = Lcur(ii)
+      END DO
+      nL2 = 0_8
+      DO ii = 1_8, nL
+        u = Lcur(ii)
+        DO p = row_ptr(u), row_ptr(u + 1) - 1_8
+          v = col_ind(p)
+          IF (v == u) CYCLE
+          IF (.NOT. visit(v)) THEN
+            visit(v) = .TRUE.
+            IF (nL2 < nmax_layer) THEN
+              nL2 = nL2 + 1_8
+              Lnx(nL2) = v
+            END IF
+          END IF
         END DO
       END DO
-      rel_color_err = SQRT(diff2) / MAX(1.0d-300, SQRT(ref2))
-      PRINT *, '[PC-COLOR-CHECK] sampled_colors=', nsamp_colors, ' rel_err=', rel_color_err
-      DEALLOCATE(samp_cells, seen_color)
-      pc_check_color_interference_once = .FALSE.
+      nL = nL2
+      IF (nL > 0_8 .AND. nL <= ncells) THEN
+        DO ii = 1_8, nL
+          Lcur(ii) = Lnx(ii)
+        END DO
+      END IF
+    END DO
+    DEALLOCATE(deg, Lcur, Lnx, visit)
+    IF (nout /= ncells) THEN
+      DEALLOCATE(order)
+      RETURN
     END IF
-    DEALLOCATE(cellprimitivesd, color)
-    DEALLOCATE(deg, fill, nlist, row_cnt)
-    CALL PC_BCSR_SORT_ROW_BLOCKS(ncells)
-    CALL PC_APPLY_COLORED_SIMILARITY(ncells)
-    CALL PC_FILTER_COLORED_BLOCKS(ncells)
-    CALL PC_REBALANCE_COLORED_ROWS(ncells)
-    PRINT *, '[PC-COLOR-AD] similarity=', pc_colored_similarity_scale, &
-      & ' row-balance=', pc_colored_row_balance, ' target=', pc_colored_row_target
-    CALL PC_POSTPROCESS_BLK_JST_AND_FACTOR(ncells)
-    IF (pc_check_minv_accuracy_once) THEN
-      ALLOCATE(rhs_chk(5_8*ncells), z_chk(5_8*ncells), az_chk(5_8*ncells), r_chk(5_8*ncells))
-      DO idx = 1_8, 5_8*ncells
-        rhs_chk(idx) = SIN(1.7d-3*REAL(idx,kind=8)) + 0.2d0*COS(9.0d-4*REAL(idx,kind=8))
+    DO i = 1_8, ncells
+      perm(i) = order(ncells - i + 1_8)
+    END DO
+    DEALLOCATE(order)
+    DO i = 1_8, ncells
+      inv_perm(perm(i)) = i
+    END DO
+    ok = .TRUE.
+  END SUBROUTINE PC_RCM_SYMMETRIC_BCSR
+
+  SUBROUTINE PC_PERMUTE_BCSR_SYMMETRIC(ncells, perm, inv_perm)
+    IMPLICIT NONE
+    INTEGER(kind=8), INTENT(IN) :: ncells
+    INTEGER(kind=8), INTENT(IN) :: perm(ncells), inv_perm(ncells)
+    INTEGER(kind=8), ALLOCATABLE :: nrp(:), nci(:), ndpos(:), tcol(:)
+    REAL(kind=8), ALLOCATABLE :: nbk(:, :, :), tblk(:, :, :), swp(:, :)
+    INTEGER(kind=8) :: new_i, old_i, p, old_j, nn, a, b, ierr, k, nnzb, mxrow, tmpi
+    REAL(kind=8), ALLOCATABLE :: xextra(:)
+    INTRINSIC MAX
+    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+    IF (SIZE(pc_row_ptr) /= ncells + 1_8) RETURN
+    nnzb = pc_row_ptr(ncells + 1_8) - 1_8
+    mxrow = 0_8
+    DO new_i = 1_8, ncells
+      old_i = perm(new_i)
+      mxrow = MAX(mxrow, pc_row_ptr(old_i + 1_8) - pc_row_ptr(old_i))
+    END DO
+    ALLOCATE(nrp(ncells + 1_8), nci(nnzb), nbk(nnzb, 5, 5), ndpos(ncells), tcol(mxrow), tblk(mxrow, 5, 5), swp(5, 5), STAT=ierr)
+    IF (ierr /= 0) RETURN
+    nrp(1) = 1_8
+    DO new_i = 1_8, ncells
+      old_i = perm(new_i)
+      nn = pc_row_ptr(old_i + 1_8) - pc_row_ptr(old_i)
+      k = 0_8
+      DO p = pc_row_ptr(old_i), pc_row_ptr(old_i + 1_8) - 1_8
+        k = k + 1_8
+        old_j = pc_col_ind(p)
+        tcol(k) = inv_perm(old_j)
+        tblk(k, :, :) = pc_blk(p, :, :)
       END DO
-      CALL APPLY_PC_INV(rhs_chk, z_chk)
-      CALL PC_APPLY_A0(ncells, z_chk, az_chk)
-      r_chk = rhs_chk - az_chk
-      minv_rel = SQRT(SUM(r_chk*r_chk)) / MAX(1.0d-300, SQRT(SUM(rhs_chk*rhs_chk)))
-      rmax = -1.0_8
-      zmax = -1.0_8
-      worst_cell = -1_8
-      DO c = 1_8, ncells
-        rloc = SQRT(SUM(r_chk((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)**2))
-        IF (rloc > rmax) THEN
-          rmax = rloc
-          zmax = SQRT(SUM(z_chk((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)**2))
-          worst_cell = c
-        END IF
+      DO a = 1_8, nn - 1_8
+        DO b = a + 1_8, nn
+          IF (tcol(b) < tcol(a)) THEN
+            tmpi = tcol(a)
+            tcol(a) = tcol(b)
+            tcol(b) = tmpi
+            swp = tblk(a, :, :)
+            tblk(a, :, :) = tblk(b, :, :)
+            tblk(b, :, :) = swp
+          END IF
+        END DO
       END DO
-      ! 含义：z=ApplyPC(rhs) 后回代 A0z，与 rhs 的相对残差。
-      ! 若 ApplyPC≈A0^{-1}，该值应接近 0；若 >>1，则预条件链条与 A0 严重失配。
-      PRINT *, '[PC-MINV-CHECK] ||rhs-A0*ApplyPC(rhs)||/||rhs||=', minv_rel
-      PRINT *, '[PC-MINV-CHECK] worst_cell=', worst_cell, ' ||r_i||2=', rmax, ' ||z_i||2=', zmax
-      DEALLOCATE(rhs_chk, z_chk, az_chk, r_chk)
-      pc_check_minv_accuracy_once = .FALSE.
+      ndpos(new_i) = 0_8
+      DO k = 1_8, nn
+        nci(nrp(new_i) + k - 1_8) = tcol(k)
+        nbk(nrp(new_i) + k - 1_8, :, :) = tblk(k, :, :)
+        IF (tcol(k) == new_i) ndpos(new_i) = nrp(new_i) + k - 1_8
+      END DO
+      nrp(new_i + 1_8) = nrp(new_i) + nn
+    END DO
+    DEALLOCATE(tcol, tblk, swp)
+    IF (ALLOCATED(pc_diag_extra) .AND. SIZE(pc_diag_extra) == ncells) THEN
+      ALLOCATE(xextra(ncells), STAT=ierr)
+      IF (ierr == 0) THEN
+        DO new_i = 1_8, ncells
+          xextra(new_i) = pc_diag_extra(perm(new_i))
+        END DO
+        pc_diag_extra = xextra
+        DEALLOCATE(xextra)
+      END IF
     END IF
-  END SUBROUTINE BUILD_PC_MATRIX_COLORED_AD
+    DEALLOCATE(pc_row_ptr, pc_col_ind, pc_blk)
+    ALLOCATE(pc_row_ptr(ncells + 1_8), pc_col_ind(nnzb), pc_blk(nnzb, 5, 5), STAT=ierr)
+    IF (ierr /= 0) RETURN
+    pc_row_ptr = nrp
+    pc_col_ind = nci
+    pc_blk = nbk
+    DEALLOCATE(nrp, nci, nbk)
+    DEALLOCATE(pc_diag_pos)
+    ALLOCATE(pc_diag_pos(ncells))
+    pc_diag_pos = ndpos
+    DEALLOCATE(ndpos)
+  END SUBROUTINE PC_PERMUTE_BCSR_SYMMETRIC
+
+	INTEGER(kind=8) FUNCTION FIND_BLOCK_POS(irow, jcol)
+	  IMPLICIT NONE
+	  INTEGER(kind=8), INTENT(IN) :: irow, jcol
+	  INTEGER(kind=8) :: p
+	  FIND_BLOCK_POS = 0_8
+	  DO p = pc_row_ptr(irow), pc_row_ptr(irow + 1_8) - 1_8
+	    IF (pc_col_ind(p) == jcol) THEN
+	      FIND_BLOCK_POS = p
+	      RETURN
+	    END IF
+	  END DO
+	END FUNCTION FIND_BLOCK_POS
+
+	SUBROUTINE PC_SORT_INSERT_I8(a, i1, i2)
+	  IMPLICIT NONE
+	  INTEGER(kind=8), INTENT(INOUT) :: a(:)
+	  INTEGER(kind=8), INTENT(IN) :: i1, i2
+	  INTEGER(kind=8) :: ii, jj, key
+	  DO ii = i1 + 1_8, i2
+	    key = a(ii)
+	    jj = ii - 1_8
+	    DO WHILE (jj >= i1 .AND. a(jj) > key)
+	      a(jj + 1_8) = a(jj)
+	      jj = jj - 1_8
+	    END DO
+	    a(jj + 1_8) = key
+	  END DO
+	END SUBROUTINE PC_SORT_INSERT_I8
+
+	! 实验用：用 AD 穷举每列非零行以消除 L1 spill；成本 ~10×ncells 次 RESIDUAL_D，非生产路径。
+	SUBROUTINE BUILD_PC_AD_FULL_STENCIL(data_4d137, cellprimitives)
+	  IMPLICIT NONE
+	  REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
+	  REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
+
+	  INTEGER(kind=8) :: ncells, c, mvar, rcell, k, ih, p, nnzb, i, i1, i2
+	  REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
+	  REAL(kind=8) :: data_4d137d(1, 4), row_sum
+	  LOGICAL, ALLOCATABLE :: mark(:)
+	  INTEGER(kind=8), ALLOCATABLE :: deg_r(:), fill_cnt(:)
+	  INTEGER(kind=8) :: nhit
+	  TYPE :: PC_COLNZ_T
+	    INTEGER(kind=8), ALLOCATABLE :: rows(:)
+	    INTEGER(kind=8) :: nr
+	  END TYPE
+	  TYPE(PC_COLNZ_T), ALLOCATABLE :: colst(:)
+	  INTRINSIC SIZE, REAL, SUM, ABS, ALLOCATED
+
+	  ncells = SIZE(cellprimitives, 1)
+	  ALLOCATE(colst(ncells), mark(ncells), cellprimitivesd(ncells, 5))
+	  data_4d137d = 0.0_8
+
+	  ! ---------- Pass A：逐列逐变量 AD，累计非零行（与 Hicken PC Jacobian 设置一致）----------
+	  DO c = 1_8, ncells
+	    colst(c)%nr = 0_8
+	    mark = .FALSE.
+	    mark(c) = .TRUE.
+	    DO mvar = 1_8, 5_8
+	      cellprimitivesd = 0.0_8
+	      cellprimitivesd(c, mvar) = 1.0_8
+	      CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+      CALL SET_PC_HICKEN_A1(.FALSE.)
+      CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
+	      CALL SET_PC_HICKEN_A1(.FALSE.)
+	      DO rcell = 1_8, ncells
+		row_sum = SUM(ABS(fluxresiduals_slnd(rcell, 1:5)))
+		IF (row_sum > pc_pattern_drop_tol) mark(rcell) = .TRUE.
+	      END DO
+	    END DO
+	    nhit = 0_8
+	    DO rcell = 1_8, ncells
+	      IF (mark(rcell)) nhit = nhit + 1_8
+	    END DO
+	    ALLOCATE(colst(c)%rows(nhit))
+	    ih = 0_8
+	    DO rcell = 1_8, ncells
+	      IF (mark(rcell)) THEN
+		ih = ih + 1_8
+		colst(c)%rows(ih) = rcell
+	      END IF
+	    END DO
+	    colst(c)%nr = nhit
+	  END DO
+	  CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+
+	  ! ---------- CSR：按行聚合列索引 ----------
+	  IF (ALLOCATED(pc_row_ptr)) DEALLOCATE(pc_row_ptr)
+	  IF (ALLOCATED(pc_col_ind)) DEALLOCATE(pc_col_ind)
+	  IF (ALLOCATED(pc_blk)) DEALLOCATE(pc_blk)
+	  IF (ALLOCATED(pc_A0)) DEALLOCATE(pc_A0)
+	  IF (ALLOCATED(pc_uinv)) DEALLOCATE(pc_uinv)
+	  IF (ALLOCATED(pc_diag_pos)) DEALLOCATE(pc_diag_pos)
+	  IF (ALLOCATED(pc_diag_extra)) DEALLOCATE(pc_diag_extra)
+
+	  ALLOCATE(pc_row_ptr(ncells + 1_8), deg_r(ncells), fill_cnt(ncells))
+	  deg_r = 0_8
+	  DO c = 1_8, ncells
+	    DO k = 1_8, colst(c)%nr
+	      rcell = colst(c)%rows(k)
+	      deg_r(rcell) = deg_r(rcell) + 1_8
+	    END DO
+	  END DO
+	  pc_row_ptr(1) = 1_8
+	  DO i = 1_8, ncells
+	    pc_row_ptr(i + 1_8) = pc_row_ptr(i) + deg_r(i)
+	  END DO
+	  nnzb = pc_row_ptr(ncells + 1_8) - 1_8
+	  ALLOCATE(pc_col_ind(nnzb), pc_blk(nnzb, 5, 5), pc_A0(nnzb, 5, 5), pc_uinv(ncells, 5, 5), &
+	&   pc_diag_pos(ncells), pc_diag_extra(ncells))
+	  pc_blk = 0.0_8
+	  pc_A0 = 0.0_8
+	  pc_uinv = 0.0_8
+	  pc_diag_pos = 0_8
+	  pc_diag_extra = 0.0_8
+
+	  fill_cnt = 0_8
+	  DO c = 1_8, ncells
+	    DO k = 1_8, colst(c)%nr
+	      rcell = colst(c)%rows(k)
+	      p = pc_row_ptr(rcell) + fill_cnt(rcell)
+	      pc_col_ind(p) = c
+	      fill_cnt(rcell) = fill_cnt(rcell) + 1_8
+	    END DO
+	  END DO
+	  DO i = 1_8, ncells
+	    i1 = pc_row_ptr(i)
+	    i2 = pc_row_ptr(i + 1_8) - 1_8
+	    IF (i2 > i1) CALL PC_SORT_INSERT_I8(pc_col_ind, i1, i2)
+	  END DO
+	  DO c = 1_8, ncells
+	    pc_diag_pos(c) = FIND_BLOCK_POS(c, c)
+	  END DO
+
+	  ! ---------- Pass B：顺序写入块（每列每变量一次 AD，与着色批处理等价但无 spill）----------
+	  DO c = 1_8, ncells
+	    DO mvar = 1_8, 5_8
+	      cellprimitivesd = 0.0_8
+	      cellprimitivesd(c, mvar) = 1.0_8
+	      CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+      CALL SET_PC_HICKEN_A1(.FALSE.)
+      CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
+	      CALL SET_PC_HICKEN_A1(.FALSE.)
+	      DO k = 1_8, colst(c)%nr
+		rcell = colst(c)%rows(k)
+		p = FIND_BLOCK_POS(rcell, c)
+		IF (p > 0_8) THEN
+		  DO ih = 1_8, 5_8
+		    pc_blk(p, ih, mvar) = fluxresiduals_slnd(rcell, ih)
+		  END DO
+		END IF
+	      END DO
+	    END DO
+	  END DO
+	  CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+
+	  DO c = 1_8, ncells
+	    IF (ALLOCATED(colst(c)%rows)) DEALLOCATE(colst(c)%rows)
+	  END DO
+	  DEALLOCATE(colst, mark, deg_r, fill_cnt, cellprimitivesd)
+	END SUBROUTINE BUILD_PC_AD_FULL_STENCIL
 
   	SUBROUTINE BUILD_PC_JST_L1(data_4d137, cellprimitives)
 	  IMPLICIT NONE
 	  REAL(kind=8), INTENT(IN) :: data_4d137(1,4)
 	  REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
 
-	  INTEGER(kind=8) :: ncells, nfaces, nbdryfaces, f, c
+	  INTEGER(kind=8) :: ncells, nfaces, nbdryfaces, f, c, i, j, p, nnzb
 	  INTEGER(kind=8) :: ownercell, neighbourcell
 	  INTEGER(kind=8) :: meshinfo(4)
-	  REAL(kind=8) :: sigma_pc, eps_pc_face, area_face, Dsc
-	  REAL(kind=8), ALLOCATABLE :: Dscalar(:), wface(:), lam_sum(:)
-	  TYPE(FLUIDD) :: fluid
-	  ! W = diag(scale)*Wtilde => dR/dWtilde = (dR/dW)*diag(scale)；欄 k 乘以 pc_s_*
-	  ! 與 APPLY_PC_INV 內參數必須完全一致
-	  REAL(kind=8), PARAMETER :: pc_s_P = 1.0d5, pc_s_T = 3.0d2, pc_s_U = 2.73d2
-
 	  INTEGER(kind=8), ALLOCATABLE :: deg(:), fill(:), nlist(:,:), row_cnt(:)
-	  INTEGER(kind=8) :: j, nnzb, p, k, nb, slot, extra_cap
-	  LOGICAL :: ok
-	  REAL(kind=8) :: conv_w, diff_w
-	  REAL(kind=8) :: nx, ny, nz, amag, un, a_face, lam_face
-	  REAL(kind=8) :: ux_face, uy_face, uz_face, t_face
-	  REAL(kind=8) :: wtot, mass_coeff, volc
-	  REAL(kind=8) :: dist_on, p_lap, vol_owner, vol_neighbour
-	  REAL(kind=8) :: w_face(5), J5(5,5), Jface(5,5), Jconv(5,5), Jcons(5,5), Jconv_eff(5,5), Jmass_eff(5,5), scale_cons
-	  REAL(kind=8) :: Jrow_owner(5,5), Jrow_neighbour(5,5)
-	    ! ==== robust-PC locals: drop compensation + shifted ILU ====
-	  INTEGER(kind=8) :: ii, pp, jj, i
-	  REAL(kind=8) :: ndiag, nblk, tinyv, drop_th, dropped_sum, compv
-	  REAL(kind=8) :: offsum, shiftv
-      REAL(kind=8) :: dd_req, dd_gap
-      REAL(kind=8) :: seed_budget, seed_acc, seed_val
-      REAL(kind=8) :: seed_norm, seed_blk(5,5)
-	  REAL(kind=8) :: diag_sum, diag_nrm
-	  INTEGER(kind=8) :: diag_cnt
-
-	  conv_w = 1.0_8
-	  diff_w = 1.0_8
-	  sigma_pc = 5.0_8
-
-	  ncells = SIZE(cellprimitives, 1)
-	  fluid = FLUIDDD()
-	  pc_build_calls = pc_build_calls + 1_8
-	  IF (pc_dafoam_consistency_mode) THEN
-		! 对齐 DAFoam 思路：PC 构建与 matrix-free 作用在同一状态空间，禁混合变换路径
-		use_conservative_unknown_operator = .FALSE.
-		use_primitive_residual_operator = .FALSE.
-		pc_use_var_scaling = .FALSE.
-		pc_colored_similarity_scale = .FALSE.
-	  END IF
-
-	  IF (.NOT. ALLOCATED(eps22) .OR. .NOT. ALLOCATED(eps44)) THEN
-		PRINT *, '[PC-ABORT] BUILD_PC_JST_L1: eps22/eps44 未分配，pc_ready=F'
-		pc_ready = .FALSE.
-		RETURN
-	  END IF
-	  IF (.NOT. ALLOCATED(cvols_mesh) .OR. .NOT. ALLOCATED(favecs_mesh) .OR. .NOT. ALLOCATED(faces_mesh)) THEN
-		PRINT *, '[PC-ABORT] BUILD_PC_JST_L1: 网格工作数组未分配，pc_ready=F'
-		pc_ready = .FALSE.
-		RETURN
-	  END IF
-
-	  IF (pc_use_lagged_update .AND. pc_ready .AND. (pc_ncells == ncells)) THEN
-		IF (.NOT. pc_force_rebuild_next) THEN
-		  IF (MOD(pc_build_calls - 1_8, MAX(1_8, pc_lag_steps)) /= 0_8) THEN
-		    PRINT *, '[PC-LAG] reuse existing preconditioner, call=', pc_build_calls, &
-			  & ' lag_steps=', pc_lag_steps
-		    RETURN
-		  END IF
-		ELSE
-		  PRINT *, '[PC-LAG] force rebuild due to residual deterioration'
-		END IF
-	  END IF
-	  pc_force_rebuild_next = .FALSE.
-
-	  IF (pc_use_full_ad_jacobian_pc) THEN
-	    PRINT *, '[PC] pc_use_full_ad_jacobian_pc=T -> FULL-AD Jacobian（與 TANGENT_MATVEC 同源全模板；極慢）call=', &
-	      & pc_build_calls
-	    CALL BUILD_PC_AD_FULL_STENCIL_AD(data_4d137, cellprimitives, ncells)
-	    CALL PC_POSTPROCESS_BLK_JST_AND_FACTOR(ncells)
-	    RETURN
-	  END IF
-
-	  IF (pc_ab_force_am1_only .AND. pc_ab_force_twolv_only) THEN
-	    PRINT *, '[PC-AB] am1_only 與 twolv_only 同時為真 -> 採用 AM1-only'
-	  END IF
-	  IF (pc_use_full_ad_periodic .AND. pc_full_ad_period > 0_8 .AND. &
-	      & MOD(pc_build_calls, pc_full_ad_period) == 0_8) THEN
-	    PRINT *, '[PC] periodic FULL-AD Jacobian build, call=', pc_build_calls, ' period=', pc_full_ad_period
-	    CALL BUILD_PC_AD_FULL_STENCIL_AD(data_4d137, cellprimitives, ncells)
-	    CALL PC_POSTPROCESS_BLK_JST_AND_FACTOR(ncells)
-	    RETURN
-	  END IF
-
-	  IF (pc_use_colored_ad) THEN
-	    PRINT *, '[PC] BUILD_PC_JST_L1: 着色 AD + L1（inner_rich=', pc_use_inner_richardson, &
-	      & ' iters=', pc_inner_rich_iters, ' full_AD_pc=', pc_use_full_ad_jacobian_pc, &
-	      & ' full_AD_periodic=', pc_use_full_ad_periodic, ' asm_ilu=', pc_use_asm_subdomain_ilu, &
-	      & ' asm_ready=', pc_asm_ready, '）call=', pc_build_calls, ' consistency_mode=', pc_dafoam_consistency_mode
-	    CALL BUILD_PC_MATRIX_COLORED_AD(data_4d137, cellprimitives)
-	    RETURN
-	  ELSE
-	    PRINT *, '[PC] BUILD_PC_JST_L1: analytic L1 block assembly（ADflow-like cheap PC matrix）call=', &
-	      & pc_build_calls
-	  END IF
+	  INTEGER(kind=8), ALLOCATABLE :: color(:)
+	  INTEGER(kind=8) :: ncolor, icolor, mvar, rvar, rcell
+	  REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
+	  REAL(kind=8) :: data_4d137d(1,4)
+	  LOGICAL :: ok, okdiag, rcm_ok
+	  INTEGER(kind=8) :: ierr_rcm
+	  REAL(kind=8) :: ainfn, dampv
+	    LOGICAL, PARAMETER :: pc_dbg = .FALSE.
+	  INTEGER(kind=8), PARAMETER :: dbg_max_print = 12_8
+	  LOGICAL, PARAMETER :: pc_diag_cross = .TRUE.
+	  INTEGER :: irow, jcol, c_samp_idx
+	  INTEGER(kind=8) :: c_samp
+	  REAL(kind=8) :: A_pc(5,5), A_full(5,5), A_js(5,5)
+	  REAL(kind=8) :: frob_diff, frob_fnrm, rel_rf, rel_js
+	  INTEGER(kind=8) :: nseed, nconflict, nspill, c2, ii, jj
+	  INTEGER(kind=8) :: dbg_printed_conflict, dbg_printed_spill
+	  INTEGER(kind=8) :: row_multi_max, row_multi_arg
+	  REAL(kind=8) :: seed_sum, spill_norm, inband_norm, valabs, maxabs_res
+	  REAL(kind=8) :: dmin_all, dmax_all
+	  REAL(kind=8) :: tsh_min, tsh_max, tsh
+	  REAL(kind=8) :: stab, stab_min, stab_max
+	  REAL(kind=8) :: tzing_c
+	  LOGICAL, ALLOCATABLE :: row_touched(:)
+	  INTEGER(kind=8), ALLOCATABLE :: row_touch_count(:)
 
 	  CALL UNSTRUCTUREDMESHINFO(meshinfo)
+	  ncells = SIZE(cellprimitives, 1)
+	  ALLOCATE(cellprimitivesd(ncells, 5))
+	  IF (pc_full_ad_pattern) THEN
+	    CALL BUILD_PC_AD_FULL_STENCIL(data_4d137, cellprimitives)
+	    PRINT *, '[PC-FULL] AD full stencil nnzb=', pc_row_ptr(ncells + 1_8) - 1_8, &
+	      ' avgdeg=', REAL(pc_row_ptr(ncells + 1_8) - 1_8, 8)/REAL(ncells, 8)
+	  ELSE
+	  ! ------------------------------------------------------------
+	  ! 1) 建立 level-1 稀疏結構（self + 一環鄰居）
+	  ! ------------------------------------------------------------
 	  nfaces = meshinfo(2)
 	  nbdryfaces = meshinfo(4)
 
-	  ALLOCATE(Dscalar(ncells), wface(nfaces), lam_sum(ncells))
-	  Dscalar = 0.0_8
-	  wface = 0.0_8
-	  lam_sum = 0.0_8
-
-	  DO f = 1_8, nfaces-nbdryfaces
-		ownercell = faces_mesh(f,1)
-		neighbourcell = faces_mesh(f,2)
-		IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
-		IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
-		area_face = SQRT(favecs_mesh(f,1)**2 + favecs_mesh(f,2)**2 + favecs_mesh(f,3)**2)
-		eps_pc_face = eps22(f) + sigma_pc * eps44(f)
-		Dsc = eps_pc_face * area_face
-		wface(f) = Dsc
-		Dscalar(ownercell) = Dscalar(ownercell) + Dsc
-		Dscalar(neighbourcell) = Dscalar(neighbourcell) + Dsc
-	  END DO
-
-	  ALLOCATE(deg(ncells))
-	  deg = 0_8
+	  ALLOCATE(deg(ncells)); deg = 0_8
 	  DO c = 1_8, ncells
-		deg(c) = 1_8
+		deg(c) = 1_8   ! self
 	  END DO
+
 	  DO f = 1_8, nfaces-nbdryfaces
 		ownercell = faces_mesh(f,1)
 		neighbourcell = faces_mesh(f,2)
@@ -10162,16 +9178,13 @@ CONTAINS
 		deg(neighbourcell) = deg(neighbourcell) + 1_8
 	  END DO
 
-      ! Limited 2-hop enrichment (controlled Schur-fill surrogate)
-      extra_cap = 2_8
-	  ALLOCATE(nlist(ncells, MAXVAL(deg)+extra_cap))
-	  nlist = 0_8
-	  ALLOCATE(fill(ncells))
-	  fill = 0_8
+	  ALLOCATE(nlist(ncells, MAXVAL(deg))); nlist = 0_8
+	  ALLOCATE(fill(ncells)); fill = 0_8
 	  DO c = 1_8, ncells
 		fill(c) = 1_8
 		nlist(c,1) = c
 	  END DO
+
 	  DO f = 1_8, nfaces-nbdryfaces
 		ownercell = faces_mesh(f,1)
 		neighbourcell = faces_mesh(f,2)
@@ -10182,31 +9195,11 @@ CONTAINS
 		fill(neighbourcell) = fill(neighbourcell) + 1_8
 		nlist(neighbourcell, fill(neighbourcell)) = ownercell
 	  END DO
-      DO c = 1_8, ncells
-        slot = fill(c)
-        DO j = 2_8, fill(c)
-          nb = nlist(c, j)
-          IF (nb < 1_8 .OR. nb > ncells .OR. nb == c) CYCLE
-          DO k = 2_8, fill(nb)
-            IF (slot >= SIZE(nlist,2)) EXIT
-            IF (nlist(nb,k) < 1_8 .OR. nlist(nb,k) > ncells) CYCLE
-            IF (nlist(nb,k) == c) CYCLE
-            slot = slot + 1_8
-            nlist(c,slot) = nlist(nb,k)
-          END DO
-          IF (slot >= fill(c) + extra_cap) EXIT
-        END DO
-        fill(c) = MIN(slot, SIZE(nlist,2,kind=8))
-      END DO
 
 	  ALLOCATE(row_cnt(ncells))
 	  DO c = 1_8, ncells
 		CALL SORT_UNIQUE_I8(nlist(c,1:fill(c)), row_cnt(c))
 	  END DO
-	  DO c = 1_8, ncells
-		  CALL SORT_UNIQUE_I8(nlist(c,1:fill(c)), row_cnt(c))
-	  END DO
-	  CALL PC_BUILD_RCM_ORDER(ncells, nlist, row_cnt)
 
 	  IF (ALLOCATED(pc_row_ptr)) DEALLOCATE(pc_row_ptr)
 	  ALLOCATE(pc_row_ptr(ncells+1))
@@ -10218,12 +9211,17 @@ CONTAINS
 
 	  IF (ALLOCATED(pc_col_ind)) DEALLOCATE(pc_col_ind)
 	  IF (ALLOCATED(pc_blk)) DEALLOCATE(pc_blk)
+	  IF (ALLOCATED(pc_A0)) DEALLOCATE(pc_A0)
 	  IF (ALLOCATED(pc_uinv)) DEALLOCATE(pc_uinv)
 	  IF (ALLOCATED(pc_diag_pos)) DEALLOCATE(pc_diag_pos)
-	  ALLOCATE(pc_col_ind(nnzb), pc_blk(nnzb,5,5), pc_uinv(ncells,5,5), pc_diag_pos(ncells))
+	  IF (ALLOCATED(pc_diag_extra)) DEALLOCATE(pc_diag_extra)
+
+	  ALLOCATE(pc_col_ind(nnzb), pc_blk(nnzb,5,5), pc_A0(nnzb,5,5), pc_uinv(ncells,5,5), pc_diag_pos(ncells), pc_diag_extra(ncells))
 	  pc_blk = 0.0_8
+	  pc_A0 = 0.0_8
 	  pc_uinv = 0.0_8
 	  pc_diag_pos = 0_8
+	  pc_diag_extra = 0.0_8
 
 	  p = 1_8
 	  DO c = 1_8, ncells
@@ -10233,2553 +9231,423 @@ CONTAINS
 		  p = p + 1_8
 		END DO
 	  END DO
+      CALL PC_SORT_ROWS_AND_SYNC(ncells)
 
-      ! ---- variable similarity scaling: A_tilde = D^{-1} * A * D ----
-      IF (pc_use_var_scaling) THEN
-        pc_row_scale = (/pc_var_scale_p, pc_var_scale_t, pc_var_scale_u, pc_var_scale_u, pc_var_scale_u/)
-      ELSE
-        pc_row_scale = 1.0_8
-      END IF
-      pc_col_scale = pc_row_scale
-      pc_row_inv = 1.0_8 / MAX(pc_row_scale, 1.0d-30)
-      pc_col_inv = 1.0_8 / MAX(pc_col_scale, 1.0d-30)
+	  	  ! ------------------------------------------------------------
+	  ! 2) Graph coloring + forward AD build columns
+	  ! ------------------------------------------------------------
+	  ALLOCATE(color(ncells))
+	  CALL BUILD_CELL_COLORING_L2(ncells, nlist, row_cnt, color, ncolor)
+	  PRINT *, '[PC-AD] ncolor(L2)=', ncolor
+	  PRINT *, '[PC] Hicken-A1 sigma =', pc_hicken_sigma
 
-	  DO f = 1_8, nfaces - nbdryfaces
-		ownercell = faces_mesh(f,1)
-		neighbourcell = faces_mesh(f,2)
-		IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
-		IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
+	  IF (pc_dbg) THEN
+		ALLOCATE(row_touched(ncells), row_touch_count(ncells))
+	  END IF
+	  data_4d137d = 0.0_8
 
-		nx = favecs_mesh(f,1)
-		ny = favecs_mesh(f,2)
-		nz = favecs_mesh(f,3)
-		amag = SQRT(nx*nx + ny*ny + nz*nz)
-		IF (amag <= 1.0d-30) CYCLE
+	  DO icolor = 1_8, ncolor
+	    DO mvar = 1_8, 5_8
+	      cellprimitivesd = 0.0_8
 
-		ux_face = 0.5_8*(cellprimitives(ownercell,3) + cellprimitives(neighbourcell,3))
-		uy_face = 0.5_8*(cellprimitives(ownercell,4) + cellprimitives(neighbourcell,4))
-		uz_face = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
-		t_face  = 0.5_8*(cellprimitives(ownercell,2) + cellprimitives(neighbourcell,2))
+	      DO c = 1_8, ncells
+	        IF (color(c) == icolor) THEN
+	          cellprimitivesd(c, mvar) = 1.0_8
+	        END IF
+	      END DO
+		  IF (pc_dbg) THEN
+		    ! ---------- [DBG-1] seed完整性 ----------
+		    nseed = 0_8
+		    seed_sum = 0.0_8
+		    DO c2 = 1_8, ncells
+		      IF (color(c2) == icolor) THEN
+		        nseed = nseed + 1_8
+		        seed_sum = seed_sum + ABS(cellprimitivesd(c2, mvar))
+		      END IF
+		    END DO
+		    IF (ABS(seed_sum - REAL(nseed,8)) > 1.0d-12) THEN
+		      PRINT *, '[PC-DBG][SEED-MISMATCH] color=', icolor, ' mvar=', mvar, &
+		               ' nseed=', nseed, ' sum|seed|=', seed_sum
+		    END IF
 
-		un = ABS((ux_face*nx + uy_face*ny + uz_face*nz) / amag)
-		a_face = SQRT(MAX(1.0d-30, fluid%gammaa*fluid%r*t_face))
-		lam_face = (un + a_face) * amag
-		lam_sum(ownercell) = lam_sum(ownercell) + lam_face
-		lam_sum(neighbourcell) = lam_sum(neighbourcell) + lam_face
+		    ! ---------- [DBG-2] 结构正交预检查 ----------
+		    row_touch_count = 0_8
+		    row_touched = .FALSE.
+		    nconflict = 0_8
+		    dbg_printed_conflict = 0_8
 
-		eps_pc_face = eps22(f) + sigma_pc * eps44(f)
-		Dsc = eps_pc_face * amag
+		    DO c2 = 1_8, ncells
+		      IF (color(c2) /= icolor) CYCLE
+		      DO ii = 1_8, row_cnt(c2)
+		        jj = nlist(c2, ii)   ! row cell touched by this column
+		        IF (jj < 1_8 .OR. jj > ncells) CYCLE
+		        row_touch_count(jj) = row_touch_count(jj) + 1_8
+		        row_touched(jj) = .TRUE.
+		      END DO
+		    END DO
 
-		w_face(1) = 0.5_8*(cellprimitives(ownercell,1) + cellprimitives(neighbourcell,1))
-		w_face(2) = 0.5_8*(cellprimitives(ownercell,2) + cellprimitives(neighbourcell,2))
-		w_face(3) = 0.5_8*(cellprimitives(ownercell,3) + cellprimitives(neighbourcell,3))
-		w_face(4) = 0.5_8*(cellprimitives(ownercell,4) + cellprimitives(neighbourcell,4))
-		w_face(5) = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
+		    row_multi_max = 0_8
+		    row_multi_arg = -1_8
+		    DO c2 = 1_8, ncells
+		      IF (row_touch_count(c2) > row_multi_max) THEN
+		        row_multi_max = row_touch_count(c2)
+		        row_multi_arg = c2
+		      END IF
+		      IF (row_touch_count(c2) > 1_8) THEN
+		        nconflict = nconflict + 1_8
+		        IF (dbg_printed_conflict < dbg_max_print) THEN
+		          PRINT *, '[PC-DBG][COLOR-CONFLICT] color=', icolor, ' mvar=', mvar, &
+		                   ' row=', c2, ' touched_by=', row_touch_count(c2)
+		          dbg_printed_conflict = dbg_printed_conflict + 1_8
+		        END IF
+		      END IF
+		    END DO
 
-		CALL BUILD_DUDW_5X5(w_face, fluid, J5)
-        IF (pc_use_cons_right_transform) THEN
-          CALL BUILD_DUDW_INV_5X5(w_face, fluid, Jcons)
-        ELSE
-          Jcons = 0.0_8
-          Jcons(1,1)=1.0_8; Jcons(2,2)=1.0_8; Jcons(3,3)=1.0_8; Jcons(4,4)=1.0_8; Jcons(5,5)=1.0_8
-        END IF
-		IF (pc_use_flux_jacobian) THEN
-		  CALL BUILD_FACE_FLUX_JACOBIAN_FD_5X5(w_face, fluid, nx, ny, nz, Jface)
-		  Jconv = pc_flux_jac_blend*Jface + (1.0_8-pc_flux_jac_blend)*(lam_face*J5)
-		ELSE
-		  Jconv = lam_face * J5
-		END IF
-		wtot = diff_w * Dsc
-        Jconv_eff = MATMUL(Jconv, Jcons)
-        Jmass_eff = MATMUL(J5, Jcons)
-		Jconv = conv_w * Jconv_eff + wtot * Jmass_eff
-        IF (pc_use_pressure_laplace_reg .AND. ALLOCATED(ccenters_mesh) .AND. &
-        &   SIZE(ccenters_mesh,1) >= ncells .AND. SIZE(ccenters_mesh,2) >= 3) THEN
-          dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
-          &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
-          &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
-          dist_on = MAX(dist_on, 1.0d-12)
-          p_lap = pc_press_laplace_beta * (amag / dist_on)
-          Jconv(1,1) = Jconv(1,1) + p_lap
-        END IF
+		    PRINT *, '[PC-DBG][COLOR-SUMMARY] color=', icolor, ' mvar=', mvar, &
+		             ' nseed=', nseed, ' conflict_rows=', nconflict, &
+		             ' row_touch_max=', row_multi_max, ' at_row=', row_multi_arg
+		  END IF
+		  ! row_touched 仅在 pc_dbg 时分配；勿在未分配时调用 PCDBG_SET_CONTEXT（会 SIZE 野指针 SIGSEGV）
+		  IF (pc_dbg .AND. mvar == 1_8) THEN
+		    CALL PCDBG_SET_CONTEXT(.TRUE., mvar, icolor, row_touched)
+		  END IF
+	      ! PC 构建：full JST，但采用 Hicken A1 稳健 Jacobian（eps4->0, eps2+=sigma*eps4）
+	      CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+      CALL SET_PC_HICKEN_A1(.FALSE.)
+      CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
+	      CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+	      CALL SET_PC_HICKEN_A1(.FALSE.)
+	      IF (pc_dbg .AND. mvar == 1_8) THEN
+		    CALL PCDBG_CLEAR_CONTEXT()
+		  END IF
+	      IF (pc_dbg) THEN
+		    ! ---------- [DBG-3] AD输出健康度 + 外溢检查 ----------
+		    maxabs_res = 0.0_8
+		    spill_norm = 0.0_8
+		    inband_norm = 0.0_8
+		    nspill = 0_8
+		    dbg_printed_spill = 0_8
 
-        IF (pc_use_var_scaling) Jconv = SPREAD(pc_row_inv,2,5) * Jconv * SPREAD(pc_col_scale,1,5)
+		    DO c2 = 1_8, ncells
+		      DO rvar = 1_8, 5_8
+		        valabs = ABS(fluxresiduals_slnd(c2, rvar))
+		        IF (valabs > maxabs_res) maxabs_res = valabs
 
-        ! 体积归一化的面贡献（物理上对应 dR/dW 的行尺度 ~ 1/Vol）
-        ! 这样每个单元行都保持“对角=邻接和”的守恒结构，但修正非均匀网格上的病态尺度差
-        vol_owner = MAX(cvols_mesh(ownercell), 1.0d-30)
-        vol_neighbour = MAX(cvols_mesh(neighbourcell), 1.0d-30)
-        Jrow_owner = Jconv / vol_owner
-        Jrow_neighbour = Jconv / vol_neighbour
+		        IF (fluxresiduals_slnd(c2, rvar) /= fluxresiduals_slnd(c2, rvar)) THEN
+		          PRINT *, '[PC-DBG][NAN] color=', icolor, ' mvar=', mvar, ' row=', c2, ' rvar=', rvar
+		        END IF
 
-		p = pc_diag_pos(ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_owner
-		p = pc_diag_pos(neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_neighbour
-		p = FIND_BLOCK_POS(ownercell, neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_owner
-		p = FIND_BLOCK_POS(neighbourcell, ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_neighbour
+		        IF (row_touched(c2)) THEN
+		          inband_norm = inband_norm + valabs
+		        ELSE
+		          spill_norm = spill_norm + valabs
+		          IF (valabs > 1.0d-10) THEN
+		            nspill = nspill + 1_8
+		            IF (dbg_printed_spill < dbg_max_print) THEN
+		              PRINT *, '[PC-DBG][SPILL] color=', icolor, ' mvar=', mvar, &
+		                       ' row=', c2, ' rvar=', rvar, ' |dR|=', valabs
+		              dbg_printed_spill = dbg_printed_spill + 1_8
+		            END IF
+		          END IF
+		        END IF
+		      END DO
+		    END DO
+
+		    PRINT *, '[PC-DBG][AD-OUT] color=', icolor, ' mvar=', mvar, &
+		             ' max|dR|=', maxabs_res, ' inband_l1=', inband_norm, &
+		             ' spill_l1=', spill_norm, ' spill_n(>|1e-10|)=', nspill
+		  END IF
+
+	      ! scatter compressed AD result back to columns in this color
+	      DO c = 1_8, ncells
+	        IF (color(c) /= icolor) CYCLE
+
+	        DO i = 1_8, row_cnt(c)
+	          rcell = nlist(c, i)
+	          IF (rcell < 1_8 .OR. rcell > ncells) CYCLE
+
+	          p = FIND_BLOCK_POS(rcell, c)
+	          IF (p <= 0_8) CYCLE
+
+	          DO rvar = 1_8, 5_8
+	            pc_blk(p, rvar, mvar) = fluxresiduals_slnd(rcell, rvar)
+	          END DO
+	        END DO
+	      END DO
+	    END DO
 	  END DO
+	  END IF
+	  
+	  IF (pc_precond_diag_blocks_only) THEN
+	    DO c = 1_8, ncells
+	      DO p = pc_row_ptr(c), pc_row_ptr(c + 1_8) - 1_8
+		IF (pc_col_ind(p) /= c) pc_blk(p, :, :) = 0.0_8
+	      END DO
+	    END DO
+	    PRINT *, '[PC] pc_precond_diag_blocks_only=T: off-diagonal blocks zeroed before damp/ILU'
+	  END IF
+	  
+	  ! 对角块数值核查：着色组装的 L1 块 vs 逐列 AD（full JST / JSTEPSS）
+	  IF (pc_diag_cross) THEN
+	    data_4d137d = 0.0_8
+	    DO c_samp_idx = 1, 3
+	      IF (c_samp_idx == 1) c_samp = 1_8
+	      IF (c_samp_idx == 2) c_samp = MAX(1_8, ncells / 2_8)
+	      IF (c_samp_idx == 3) c_samp = ncells
+	      p = pc_diag_pos(c_samp)
+	      IF (p <= 0_8) CYCLE
+	      A_pc = pc_blk(p,:,:)
+	      DO mvar = 1_8, 5_8
+	        cellprimitivesd = 0.0_8
+	        cellprimitivesd(c_samp, mvar) = 1.0_8
+	        CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+	        CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
+	        DO rvar = 1_8, 5_8
+	          A_full(rvar, mvar) = fluxresiduals_slnd(c_samp, rvar)
+	        END DO
+	      END DO
+	      DO mvar = 1_8, 5_8
+	        cellprimitivesd = 0.0_8
+	        cellprimitivesd(c_samp, mvar) = 1.0_8
+	        CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.TRUE.)
+	        CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
+	        DO rvar = 1_8, 5_8
+	          A_js(rvar, mvar) = fluxresiduals_slnd(c_samp, rvar)
+	        END DO
+	      END DO
+	      CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+	      frob_diff = 0.0_8
+	      frob_fnrm = 0.0_8
+	      DO irow = 1, 5
+	        DO jcol = 1, 5
+	          frob_diff = frob_diff + (A_pc(irow, jcol) - A_full(irow, jcol))**2
+	          frob_fnrm = frob_fnrm + A_full(irow, jcol)**2
+	        END DO
+	      END DO
+	      rel_rf = SQRT(frob_diff) / MAX(SQRT(frob_fnrm), 1.0d-30)
+	      frob_diff = 0.0_8
+	      frob_fnrm = 0.0_8
+	      DO irow = 1, 5
+	        DO jcol = 1, 5
+	          frob_diff = frob_diff + (A_pc(irow, jcol) - A_js(irow, jcol))**2
+	          frob_fnrm = frob_fnrm + A_js(irow, jcol)**2
+	        END DO
+	      END DO
+	      rel_js = SQRT(frob_diff) / MAX(SQRT(frob_fnrm), 1.0d-30)
+	      PRINT *, '[PC-DIAG] cell=', c_samp, ' relFrob(pc_asm-full_JST)=', rel_rf, &
+	               ' relFrob(pc_asm-jstepss_col)=', rel_js
+	    END DO
+	  END IF
+
+	  IF (ALLOCATED(cellprimitivesd)) DEALLOCATE(cellprimitivesd)
+	  IF (ALLOCATED(color)) DEALLOCATE(color)
+	  IF (pc_dbg) THEN
+		DEALLOCATE(row_touched, row_touch_count)
+	  END IF
+	  CALL SET_USE_JSTEPSS_FOR_RESIDUAL_D(.FALSE.)
+	  ! 轻量列缩放：降低 P/T/U 量纲差异导致的 ILU 病态
+	  pc_col_scale = (/1.0d-5, 3.3d-3, 3.7d-3, 3.7d-3, 3.7d-3/)
+	  pc_col_scale = 1.0_8
+	  DO i = 1_8, 5_8
+		pc_col_inv(i) = 1.0_8
+	  END DO
+	  IF (pc_print_jac5x5) CALL PCDBG_PRINT_CELL_DIAG_JAC5X5(data_4d137, cellprimitives, 1_8)
+	  ! ------------------------------------------------------------
+	  ! 3) Diagonal damping + block ILU(0)
+	  ! ------------------------------------------------------------
+	  ! 著色組裝多次 RESIDUAL_D 後，刷新正向殘差供 η_d 與 T（與文獻 inexact-Newton 一致）
+	  CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitives)
+	  IF (.NOT. pc_precond_diag_blocks_only) THEN
+	    CALL COMPUTE_PC_TZINGER_T(5_8*ncells)
+	  END IF
+	  dmin_all = 1.0d300
+	  dmax_all = 0.0_8
+	  tsh_min = 1.0d300
+	  tsh_max = 0.0_8
+	  stab_min = 1.0d300
+	  stab_max = 0.0_8
+	  	  DO c = 1_8, ncells
+		p = pc_diag_pos(c)
+		IF (p > 0_8) THEN
+		  IF (pc_precond_diag_blocks_only) THEN
+		    pc_diag_extra(c) = pc_diag_jacobi_eps
+		    DO i = 1_8, 5_8
+		      pc_blk(p, i, i) = pc_blk(p, i, i) + pc_diag_jacobi_eps
+		    END DO
+		  ELSE
+		    ainfn = 0.0_8
+		    DO i = 1_8, 5_8
+		      DO j = 1_8, 5_8
+			ainfn = MAX(ainfn, ABS(pc_blk(p, i, j)))
+		      END DO
+		    END DO
+		    dampv = pc_diag_tau * MAX(1.0_8, ainfn) + pc_diag_rel_floor * MAX(1.0_8, ainfn)
+		    IF (ainfn < 1.0d-10) dampv = dampv + pc_diag_tau_boost
+		    tsh = pc_tshift_factor * MAX(1.0_8, ainfn)
+		    IF (pc_ilu_stab_ainfn_cap > 0.0_8) THEN
+		      stab = pc_ilu_diag_stab * MAX(1.0_8, MIN(ainfn, pc_ilu_stab_ainfn_cap))
+		    ELSE
+		      stab = pc_ilu_diag_stab * MAX(1.0_8, ainfn)
+		    END IF
+		    IF (pc_ilu_stab_abs_cap > 0.0_8) stab = MIN(stab, pc_ilu_stab_abs_cap)
+		    tzing_c = 0.0_8
+		    IF (pc_tzinger_in_pc) THEN
+		      IF (ALLOCATED(pc_tzinger_T) .AND. SIZE(pc_tzinger_T) >= 5_8 * ncells) THEN
+			tzing_c = pc_tzinger_T((c - 1_8) * 5_8 + 1_8)
+		      END IF
+		    END IF
+		    pc_diag_extra(c) = dampv + tsh + stab + tzing_c
+		    DO i = 1_8, 5_8
+		      pc_blk(p, i, i) = pc_blk(p, i, i) + dampv + tsh + stab + tzing_c
+		    END DO
+		  END IF
+		END IF
+	  END DO
+	  PRINT *, '[PC] damping min/max = ', dmin_all, dmax_all
+	  PRINT *, '[PC] tshift  min/max = ', tsh_min, tsh_max
+	  PRINT *, '[PC] ilu_diag_stab coeff=', pc_ilu_diag_stab, ' add min/max =', stab_min, stab_max, &
+	    ' stab_ainfn_cap=', pc_ilu_stab_ainfn_cap, ' stab_abs_cap=', pc_ilu_stab_abs_cap
+	  pc_rcm_active = .FALSE.
+	  IF (ALLOCATED(pc_perm)) DEALLOCATE(pc_perm)
+	  IF (ALLOCATED(pc_inv_perm)) DEALLOCATE(pc_inv_perm)
+	  IF (pc_use_rcm) THEN
+	    ALLOCATE(pc_perm(ncells), pc_inv_perm(ncells), STAT=ierr_rcm)
+	    IF (ierr_rcm == 0) THEN
+	      CALL PC_RCM_SYMMETRIC_BCSR(ncells, pc_row_ptr, pc_col_ind, pc_perm, pc_inv_perm, rcm_ok)
+	      IF (rcm_ok) THEN
+		CALL PC_PERMUTE_BCSR_SYMMETRIC(ncells, pc_perm, pc_inv_perm)
+		pc_rcm_active = .TRUE.
+		PRINT *, '[PC-RCM] symmetric RCM applied, ncells=', ncells
+	      ELSE
+		DEALLOCATE(pc_perm, pc_inv_perm)
+		PRINT *, '[PC-RCM] failed or incomplete graph, natural order kept'
+	      END IF
+	    END IF
+	  END IF
+	  	  ! ILU 前块均衡（与 BuFlow_test_d.f90 BUILD_PC_JST_L1 中 pc_use_equil 段一致）
+	  IF (pc_use_equil) THEN
+	    CALL APPLY_PC_BLOCK_EQUIL(ncells)
+	  END IF
+	  IF (ALLOCATED(pc_diag_inv)) DEALLOCATE(pc_diag_inv)
+	  ALLOCATE(pc_diag_inv(ncells,5,5))
+	  pc_diag_inv = 0.0_8
 	  DO c = 1_8, ncells
 		p = pc_diag_pos(c)
 		IF (p > 0_8) THEN
-		  pc_blk(p,1,1) = pc_blk(p,1,1) + 1.0d-10
-		  pc_blk(p,2,2) = pc_blk(p,2,2) + 1.0d-10
-		  pc_blk(p,3,3) = pc_blk(p,3,3) + 1.0d-10
-		  pc_blk(p,4,4) = pc_blk(p,4,4) + 1.0d-10
-		  pc_blk(p,5,5) = pc_blk(p,5,5) + 1.0d-10
+		  CALL INVERT_5X5(pc_blk(p,:,:), pc_diag_inv(c,:,:), okdiag)
+		  IF (.NOT. okdiag) THEN
+			pc_diag_inv(c,:,:) = 0.0_8
+			DO i = 1_8, 5_8
+			  pc_diag_inv(c,i,i) = 1.0_8 / MAX(ABS(pc_blk(p,i,i)), 1.0d-12)
+			END DO
+		  END IF
+		ELSE
+		  DO i = 1_8, 5_8
+			pc_diag_inv(c,i,i) = 1.0_8
+		  END DO
 		END IF
 	  END DO
-	  IF (pc_use_pseudo_time_mass .OR. pc_use_auto_mass_stab) THEN
+
+	  ! 保存 ILU 前的矩阵，用于稳健 fallback（pc_blk 会在 ILU 中被覆写为 LU 因子）
+	  pc_A0 = pc_blk
+	  CALL PCDBG_COMPARE_A_MV(data_4d137, cellprimitives)
+
+	  CALL FACTOR_BLOCK_ILU0(ncells, ok)
+	  IF (.NOT. ok) THEN
+		PRINT *, '[PC] block-ILU(0) 首次失败，按 |diag| 加相对对角重试 pc_ilu_retry_diag=', pc_ilu_retry_diag
+		pc_blk = pc_A0
 		DO c = 1_8, ncells
 		  p = pc_diag_pos(c)
-		  IF (p <= 0_8) CYCLE
-		  volc = MAX(cvols_mesh(c), 1.0d-30)
-          mass_coeff = 0.0_8
-          IF (pc_use_pseudo_time_mass) THEN
-		    mass_coeff = pc_mass_cfl * (lam_sum(c) + Dscalar(c)) / volc
-          END IF
-          IF (pc_use_auto_mass_stab) THEN
-            mass_coeff = MAX(mass_coeff, pc_mass_auto_beta * (lam_sum(c) + Dscalar(c)) / volc)
-          END IF
-		  mass_coeff = MAX(mass_coeff, pc_mass_floor)
-		  w_face(1:5) = cellprimitives(c, 1:5)
-		  CALL BUILD_DUDW_5X5(w_face, fluid, J5)
-          IF (pc_use_cons_right_transform) THEN
-            CALL BUILD_DUDW_INV_5X5(w_face, fluid, Jcons)
-            Jmass_eff = MATMUL(J5, Jcons)
-          ELSE
-            Jmass_eff = J5
-          END IF
-          IF (pc_use_var_scaling) Jmass_eff = SPREAD(pc_row_inv,2,5) * Jmass_eff * SPREAD(pc_col_scale,1,5)
-		  pc_blk(p,:,:) = pc_blk(p,:,:) + mass_coeff * Jmass_eff
-		END DO
-	  END IF
-      IF (pc_use_coarse_pv_schur .AND. (.NOT. pc_use_schur_split)) pc_use_two_level = .TRUE.
-	  PRINT *, '[PC-BUILD] flux_jac=', pc_use_flux_jacobian, ' blend=', pc_flux_jac_blend, &
-	&         ' var_scaling=', pc_use_var_scaling, ' pseudo_mass=', pc_use_pseudo_time_mass, ' auto_mass=', pc_use_auto_mass_stab, &
-    &         ' p_lap=', pc_use_pressure_laplace_reg, ' cons_right=', pc_use_cons_right_transform, ' am_poly=', pc_use_am_poly, &
-	&         ' am1=', pc_use_am1, ' two_level=', pc_use_two_level, &
-    &         ' coarse_pv_schur=', pc_use_coarse_pv_schur, ' schur_split=', pc_use_schur_split
-        ! 0) 先保留你已有的对角小正则
-	  !    pc_blk(p,k,k) += 1.0d-10  (已有)
-
-	  ! 1) 块缩放
-	  IF (pc_use_equil) THEN
-		CALL APPLY_PC_BLOCK_EQUIL(ncells)
-	  END IF
-
-	  ! 2) 非对角门限与限幅（缩放后做）
-	  IF (pc_use_offdiag_drop) THEN
-		CALL PC_DAMP_OFFDIAG_TOPK(ncells)
-	  END IF
-	    ! --- dropped offdiag compensation to diagonal (MILUT-style) ---
-	  IF (pc_use_drop_comp) THEN
-		tinyv = 1.0d-30
-		DO ii = 1_8, ncells
-		  p = pc_diag_pos(ii)
-		  IF (p <= 0_8) CYCLE
-
-		  CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
-		  ndiag = MAX(ndiag, tinyv)
-		  drop_th = pc_drop_rel * ndiag
-
-		  dropped_sum = 0.0_8
-		  DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
-		    jj = pc_col_ind(pp)
-		    IF (jj == ii) CYCLE
-		    CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
-		    IF (nblk <= drop_th) dropped_sum = dropped_sum + nblk
-		  END DO
-
-		  compv = pc_drop_comp_beta * dropped_sum
-		  IF (compv > 0.0_8) THEN
+		  IF (p > 0_8) THEN
 		    DO i = 1_8, 5_8
-		      pc_blk(p,i,i) = pc_blk(p,i,i) + compv
+		      pc_blk(p, i, i) = pc_blk(p, i, i) + pc_ilu_retry_diag*MAX(ABS(pc_blk(p, i, i)), 1.0_8)
 		    END DO
 		  END IF
 		END DO
-	  END IF
-
-	  ! 3) 再做一次极小对角保护（防止门限后奇异）
-	  DO c = 1_8, ncells
-		p = pc_diag_pos(c)
-		IF (p > 0_8) THEN
-		  pc_blk(p,1,1) = pc_blk(p,1,1) + pc_diag_eps
-		  pc_blk(p,2,2) = pc_blk(p,2,2) + pc_diag_eps
-		  pc_blk(p,3,3) = pc_blk(p,3,3) + pc_diag_eps
-		  pc_blk(p,4,4) = pc_blk(p,4,4) + pc_diag_eps
-		  pc_blk(p,5,5) = pc_blk(p,5,5) + pc_diag_eps
-		END IF
-	  END DO	 
-      ! Tiny seeding on empty off-diagonal blocks (only enriched positions), with strict row budget
-      DO ii = 1_8, ncells
-        p = pc_diag_pos(ii)
-        IF (p <= 0_8) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
-        seed_blk = pc_blk(p,:,:)
-        CALL BLOCK_INF_NORM5(seed_blk, seed_norm)
-        IF (seed_norm > 1.0d-30) THEN
-          seed_blk = seed_blk / seed_norm
-        ELSE
-          seed_blk = 0.0_8
-          DO i = 1_8, 5_8
-            seed_blk(i,i) = 1.0_8
-          END DO
-        END IF
-        seed_budget = MAX(1.0d-18, 1.0d-4 * ndiag)
-        seed_acc = 0.0_8
-        DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
-          jj = pc_col_ind(pp)
-          IF (jj == ii) CYCLE
-          CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
-          IF (nblk <= 1.0d-30) THEN
-            seed_val = MIN(1.0d-10*MAX(1.0d0, ndiag), seed_budget-seed_acc)
-            IF (seed_val <= 0.0_8) EXIT
-            pc_blk(pp,:,:) = pc_blk(pp,:,:) - seed_val * seed_blk
-            pc_blk(p ,:,:) = pc_blk(p ,:,:) + seed_val * seed_blk
-            seed_acc = seed_acc + seed_val
-          END IF
-        END DO
-      END DO
-
-      ! 3.5) 固定的块对角占优修正（不依赖开关）
-      !      目的：提升 ILU 对病态/弱对角块的鲁棒性（类似 Gershgorin 思路）
-      DO ii = 1_8, ncells
-        p = pc_diag_pos(ii)
-        IF (p <= 0_8) CYCLE
-        CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
-        offsum = 0.0_8
-        DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
-          jj = pc_col_ind(pp)
-          IF (jj == ii) CYCLE
-          CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
-          offsum = offsum + nblk
-        END DO
-        dd_req = 0.15d0 * offsum
-        dd_gap = dd_req - ndiag
-        IF (dd_gap > 0.0_8) THEN
-          DO i = 1_8, 5_8
-            pc_blk(p,i,i) = pc_blk(p,i,i) + dd_gap
-          END DO
-        END IF
-      END DO
-
-	  IF (pc_use_ilut_lite) THEN
-		  CALL BUILD_ILUT_PATTERN_LITE(ncells)
-		  ! 重建对角位置（模式变了）
-		  DO c = 1_8, ncells
-			pc_diag_pos(c) = FIND_BLOCK_POS(c, c)
-		  END DO
-		  PRINT *, '[PC] ILUT-lite pattern enriched, extra/row=', pc_ilut_extra_per_row
-	  END IF
-	    ! --- shifted block-ILU diagonal augmentation ---
-	  IF (pc_use_shifted_ilu) THEN
-		DO ii = 1_8, ncells
-		  p = pc_diag_pos(ii)
-		  IF (p <= 0_8) CYCLE
-
-		  offsum = 0.0_8
-		  DO pp = pc_row_ptr(ii), pc_row_ptr(ii+1_8)-1_8
-		    jj = pc_col_ind(pp)
-		    IF (jj == ii) CYCLE
-		    CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
-		    offsum = offsum + nblk
-		  END DO
-
-		  shiftv = pc_shift_alpha * offsum
-		  IF (shiftv > 0.0_8) THEN
+		pc_A0 = pc_blk
+		DO c = 1_8, ncells
+		  p = pc_diag_pos(c)
+		  IF (p > 0_8) THEN
+		    CALL INVERT_5X5(pc_blk(p, :, :), pc_diag_inv(c, :, :), okdiag)
+		    IF (.NOT. okdiag) THEN
+		      pc_diag_inv(c, :, :) = 0.0_8
+		      DO i = 1_8, 5_8
+			pc_diag_inv(c, i, i) = 1.0_8 / MAX(ABS(pc_blk(p, i, i)), 1.0d-12)
+		      END DO
+		    END IF
+		  ELSE
 		    DO i = 1_8, 5_8
-		      pc_blk(p,i,i) = pc_blk(p,i,i) + shiftv
+		      pc_diag_inv(c, i, i) = 1.0_8
 		    END DO
 		  END IF
 		END DO
+		CALL FACTOR_BLOCK_ILU0(ncells, ok)
 	  END IF
-	    ! --- targeted diagonal boost for ill-conditioned diagonal blocks ---
-	  IF (pc_use_targeted_boost) CALL PC_TARGETED_DIAG_BOOST(ncells)
-	  IF (pc_use_gersh_shift) CALL PC_ENFORCE_BLOCK_GERSH_SHIFT(ncells)
-	    ! ===== 备份 A0（必须在 ILU 分解前）=====
-	  IF (ALLOCATED(pc_a0_blk)) DEALLOCATE(pc_a0_blk)
-	  ALLOCATE(pc_a0_blk(SIZE(pc_blk,1), 5, 5))
-	  pc_a0_blk = pc_blk
-	  pc_a0_ready = .TRUE.
-	  diag_sum = 0.0_8
-	  diag_cnt = 0_8
-	  DO c = 1_8, ncells
-		p = pc_diag_pos(c)
-		IF (p <= 0_8) CYCLE
-		CALL BLOCK_INF_NORM5(pc_a0_blk(p,:,:), diag_nrm)
-		diag_sum = diag_sum + diag_nrm
-		diag_cnt = diag_cnt + 1_8
-	  END DO
-	  IF (diag_cnt > 0_8) THEN
-		pc_a0_diag_mean = diag_sum / REAL(diag_cnt, kind=8)
+	  IF (.NOT. ok) THEN
+		PRINT *, '[PC] block-ILU(0) 因子分解失败，预条件关闭'
+		pc_ready = .FALSE.
 	  ELSE
-		pc_a0_diag_mean = 1.0_8
+		pc_ncells = ncells
+		pc_ready = .TRUE.
 	  END IF
-	  PRINT *, '[PC-A0] backup ready, nnzb=', SIZE(pc_a0_blk,1) 
-	  CALL FACTOR_BLOCK_ILU0(ncells, ok)
-	    IF (.NOT. ok) THEN
-		  PRINT *, '[PC] block-ILU(0) factor failed, fallback OFF'
-		  pc_ready = .FALSE.
-		  pc_sp_ready = .FALSE.
-		  pc_a0_ready = .FALSE. 
-		ELSE
-		  pc_ncells = ncells
-		  pc_ready = .TRUE.
-		  IF (pc_use_pschur .OR. pc_use_schur_split) THEN
-			CALL PC_BUILD_PRESSURE_SCHUR_STRONG(ncells)
-		  ELSE
-			pc_sp_ready = .FALSE.
-		  END IF
-		  IF (pc_use_schur_split .AND. pc_sp_ready) THEN
-			CALL PC_BUILD_SCHUR_SPLIT_DATA(ncells)
-		  ELSE
-			IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
-		  END IF
-		  PRINT *, '[PC-SCHUR] flags: pschur=', pc_use_pschur, ' split=', pc_use_schur_split, ' sp_ready=', pc_sp_ready
-		END IF
-		IF (pc_ready .AND. pc_use_two_level) THEN
-		  CALL PC_BUILD_COARSE_AGG(ncells)
-		ELSE
-		  pc_coarse_ready = .FALSE.
-		END IF
 
-	  DEALLOCATE(Dscalar, wface, lam_sum, deg, fill, nlist, row_cnt)
+	  IF (ALLOCATED(deg)) DEALLOCATE(deg, fill, nlist, row_cnt)
 	END SUBROUTINE BUILD_PC_JST_L1
-	SUBROUTINE PC_BUILD_PRESSURE_SCHUR_STRONG(ncells)
+
+	SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
 	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  INTEGER(kind=8) :: i, j, k, p, pij, pki, pkj, pd
-	  REAL(kind=8) :: epsd, app, corr, sij
-	  REAL(kind=8) :: Apu_i(4), Aup_j(4), Auu4(4,4), Auu4_inv(4,4)
-	  REAL(kind=8) :: tmp4(4), dotv
-	  LOGICAL :: ok4
-	  REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:)
+	  REAL(kind=8), INTENT(IN)  :: vec_in(:)
+	  REAL(kind=8), INTENT(OUT) :: vec_out(:)
 
-	  epsd = MAX(1.0d-30, pc_pschur_diag_eps)
+	  INTEGER(kind=8) :: ncells, i, p, j
+	  REAL(kind=8), ALLOCATABLE :: y(:, :)
+	  REAL(kind=8) :: rhs(5), tmp(5)
 
-	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_diag_pos)) THEN
-		pc_sp_ready = .FALSE.
+	  ncells = SIZE(vec_in) / 5
+
+	  IF (.NOT. pc_ready) THEN
+		vec_out = vec_in
+		RETURN
+	  END IF
+	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk) .OR. .NOT. ALLOCATED(pc_uinv)) THEN
+		vec_out = vec_in
+		RETURN
+	  END IF
+	  IF (ncells /= pc_ncells) THEN
+		vec_out = vec_in
 		RETURN
 	  END IF
 
-	  ! 优先用 A0 备份（未分解矩阵）
-	    IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-		  ALLOCATE(Ablk(SIZE(pc_a0_blk,1),5,5))
-		  Ablk = pc_a0_blk
-		ELSEIF (ALLOCATED(pc_blk)) THEN
-		  ALLOCATE(Ablk(SIZE(pc_blk,1),5,5))
-		  Ablk = pc_blk
-		ELSE
-		  pc_sp_ready = .FALSE.
-		  RETURN
-		END IF
-
-	  IF (ALLOCATED(pc_sp_diag)) DEALLOCATE(pc_sp_diag)
-	  IF (ALLOCATED(pc_sp_off))  DEALLOCATE(pc_sp_off)
-	  ALLOCATE(pc_sp_diag(ncells))
-	  ALLOCATE(pc_sp_off(SIZE(pc_col_ind)))
-
-	  pc_sp_diag = 0.0_8
-	  pc_sp_off  = 0.0_8
-
-	  ! 先构建 S_ij（同一邻接模板）
-	  DO i = 1_8, ncells
-		pd = pc_diag_pos(i)
-		IF (pd <= 0_8) CYCLE
-
-		! Apu(i,i): row P col [T,Ux,Uy,Uz]
-		Apu_i(1) = Ablk(pd,1,2)
-		Apu_i(2) = Ablk(pd,1,3)
-		Apu_i(3) = Ablk(pd,1,4)
-		Apu_i(4) = Ablk(pd,1,5)
-
-		! inv(Auu(i,i))
-		Auu4 = 0.0_8
-		Auu4(1,1) = Ablk(pd,2,2); Auu4(1,2) = Ablk(pd,2,3); Auu4(1,3) = Ablk(pd,2,4); Auu4(1,4) = Ablk(pd,2,5)
-		Auu4(2,1) = Ablk(pd,3,2); Auu4(2,2) = Ablk(pd,3,3); Auu4(2,3) = Ablk(pd,3,4); Auu4(2,4) = Ablk(pd,3,5)
-		Auu4(3,1) = Ablk(pd,4,2); Auu4(3,2) = Ablk(pd,4,3); Auu4(3,3) = Ablk(pd,4,4); Auu4(3,4) = Ablk(pd,4,5)
-		Auu4(4,1) = Ablk(pd,5,2); Auu4(4,2) = Ablk(pd,5,3); Auu4(4,3) = Ablk(pd,5,4); Auu4(4,4) = Ablk(pd,5,5)
-
-		CALL INVERT_DENSE(Auu4, Auu4_inv, ok4)
-		IF (.NOT. ok4) THEN
-		  Auu4_inv = 0.0_8
-		  Auu4_inv(1,1)=1.0_8/epsd; Auu4_inv(2,2)=1.0_8/epsd
-		  Auu4_inv(3,3)=1.0_8/epsd; Auu4_inv(4,4)=1.0_8/epsd
-		END IF
-
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1)-1_8
-		  j = pc_col_ind(p)
-		  app = Ablk(p,1,1)
-
-		  ! Aup(i,j): row [T,Ux,Uy,Uz] col P（同一个块 p）
-		  Aup_j(1) = Ablk(p,2,1)
-		  Aup_j(2) = Ablk(p,3,1)
-		  Aup_j(3) = Ablk(p,4,1)
-		  Aup_j(4) = Ablk(p,5,1)
-
-		  ! corr = Apu_i * inv(Auu_ii) * Aup_ij
-		  tmp4 = MATMUL(Auu4_inv, Aup_j)
-		  dotv = Apu_i(1)*tmp4(1) + Apu_i(2)*tmp4(2) + Apu_i(3)*tmp4(3) + Apu_i(4)*tmp4(4)
-
-		  sij = app - dotv
-		  pc_sp_off(p) = sij
-		END DO
-	  END DO
-
-	  ! 分离对角到 pc_sp_diag，off 中对角位置置零
-	  DO i = 1_8, ncells
-		pd = pc_diag_pos(i)
-		IF (pd > 0_8) THEN
-		  pc_sp_diag(i) = pc_sp_off(pd)
-		  pc_sp_off(pd) = 0.0_8
-		ELSE
-		  pc_sp_diag(i) = epsd
-		END IF
-
-		IF (ABS(pc_sp_diag(i)) < epsd) THEN
-		  pc_sp_diag(i) = SIGN(epsd, pc_sp_diag(i)+epsd)
-		END IF
-	  END DO
-
-	  pc_sp_ready = .TRUE.
-	  PRINT *, '[PC-PSCHUR] strong ready, sweeps=', pc_pschur_sweeps
-	  IF (ALLOCATED(Ablk)) DEALLOCATE(Ablk)
-	END SUBROUTINE PC_BUILD_PRESSURE_SCHUR_STRONG
-	SUBROUTINE PC_APPLY_PRESSURE_SCHUR_CORR(ncells, r_in, e_out)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  REAL(kind=8), INTENT(IN)  :: r_in(:)
-	  REAL(kind=8), INTENT(OUT) :: e_out(:)
-
-	  INTEGER(kind=8) :: i, j, p, it
-	  REAL(kind=8), ALLOCATABLE :: rp(:), dp(:), dp_old(:)
-	  REAL(kind=8) :: rhs, tinyv, omega_p
-
-	  tinyv = MAX(1.0d-30, pc_pschur_diag_eps)
-	  omega_p = 0.2_8   ! 关键：阻尼，避免过冲
-
-	  e_out = 0.0_8
-	  IF (.NOT. pc_sp_ready) RETURN
-	  IF (.NOT. ALLOCATED(pc_sp_diag) .OR. .NOT. ALLOCATED(pc_sp_off)) RETURN
-
-	  ALLOCATE(rp(ncells), dp(ncells), dp_old(ncells))
-	  rp = 0.0_8
-	  dp = 0.0_8
-
-	  DO i = 1_8, ncells
-		rp(i) = r_in((i-1_8)*5_8 + 1_8)   ! pressure channel
-	  END DO
-
-	  DO it = 1_8, MAX(1_8, pc_pschur_sweeps)
-		dp_old = dp
-		DO i = 1_8, ncells
-		  rhs = rp(i)
-		  DO p = pc_row_ptr(i), pc_row_ptr(i+1)-1_8
-		    j = pc_col_ind(p)
-		    IF (j == i) CYCLE
-		    rhs = rhs - pc_sp_off(p) * dp_old(j)
-		  END DO
-		  dp(i) = (1.0_8-omega_p)*dp_old(i) + omega_p * rhs / SIGN(MAX(ABS(pc_sp_diag(i)), tinyv), pc_sp_diag(i))
-		END DO
-	  END DO
-
-	  DO i = 1_8, ncells
-		e_out((i-1_8)*5_8 + 1_8) = dp(i)
-	  END DO
-
-	  DEALLOCATE(rp, dp, dp_old)
-	END SUBROUTINE PC_APPLY_PRESSURE_SCHUR_CORR
-	SUBROUTINE PC_SORT_INSERT_I8(a, i1, i2)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(INOUT) :: a(:)
-	  INTEGER(kind=8), INTENT(IN) :: i1, i2
-	  INTEGER(kind=8) :: ii, jj, key
-
-	  IF (i2 <= i1) RETURN
-	  DO ii = i1 + 1_8, i2
-		key = a(ii)
-		jj = ii - 1_8
-		DO WHILE (jj >= i1 .AND. a(jj) > key)
-		  a(jj + 1_8) = a(jj)
-		  jj = jj - 1_8
-		END DO
-		a(jj + 1_8) = key
-	  END DO
-	END SUBROUTINE PC_SORT_INSERT_I8
-	SUBROUTINE PC_SORT_ROW_WITH_BLK(col_ind, blk, i1, i2)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(INOUT) :: col_ind(:)
-	  REAL(kind=8), INTENT(INOUT) :: blk(:, :, :)
-	  INTEGER(kind=8), INTENT(IN) :: i1, i2
-	  INTEGER(kind=8) :: ii, jj, key
-	  REAL(kind=8) :: btmp(5,5)
-
-	  IF (i2 <= i1) RETURN
-
-	  DO ii = i1 + 1_8, i2
-		key = col_ind(ii)
-		btmp = blk(ii, :, :)
-		jj = ii - 1_8
-
-		DO WHILE (jj >= i1 .AND. col_ind(jj) > key)
-		  col_ind(jj + 1_8) = col_ind(jj)
-		  blk(jj + 1_8, :, :) = blk(jj, :, :)
-		  jj = jj - 1_8
-		END DO
-
-		col_ind(jj + 1_8) = key
-		blk(jj + 1_8, :, :) = btmp
-	  END DO
-	END SUBROUTINE PC_SORT_ROW_WITH_BLK
-	SUBROUTINE BUILD_ILUT_PATTERN_LITE(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  INTEGER(kind=8) :: i, j, k, p, q, pd, pos, ncur, nadd, nold, w
-	  INTEGER(kind=8) :: old_nnz, new_nnz, kkeep, idx, ii
-	  INTEGER(kind=8), ALLOCATABLE :: add_cnt(:), new_row_ptr(:), used(:)
-	  INTEGER(kind=8), ALLOCATABLE :: cand_cols(:), pick_idx(:)
-	  REAL(kind=8), ALLOCATABLE :: cand_score(:)
-	  REAL(kind=8), ALLOCATABLE :: new_blk(:,:,:)
-	  INTEGER(kind=8), ALLOCATABLE :: new_col_ind(:)
-	  REAL(kind=8) :: n_ik, n_kj, n_kk, score, tinyv, bestv
-	  INTEGER(kind=8), ALLOCATABLE :: cand_bestk(:)
-	  INTEGER(kind=8) :: p_ik, p_kj, p_kk, kbest
-	  LOGICAL :: inv_ok
-	  REAL(kind=8) :: Aik(5,5), Akj(5,5), Akk(5,5), Akk_inv(5,5), tmp55(5,5), fill55(5,5)
-
-	  IF (.NOT. pc_use_ilut_lite) RETURN
-	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
-
-	  tinyv = 1.0d-30
-	  old_nnz = pc_row_ptr(ncells+1_8) - 1_8
-
-	  ALLOCATE(add_cnt(ncells)); add_cnt = 0_8
-	  ALLOCATE(used(ncells))
-	  ALLOCATE(cand_cols(ncells), cand_score(ncells), cand_bestk(ncells))
-	  cand_cols = 0_8
-      cand_score = 0.0_8
-	  cand_bestk = 0_8
-
-	  ! ---------- Pass-1: 统计每行要新增多少 ----------
-	  DO i = 1_8, ncells
-	    cand_cols = 0_8
-		cand_score = 0.0_8
-		cand_bestk = 0_8
-		used = 0_8
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  used(pc_col_ind(p)) = 1_8
-		END DO
-		
-		idx = 0_8
-
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  k = pc_col_ind(p)
-		  IF (k < 1_8 .OR. k > ncells) CYCLE
-
-		  CALL BLOCK_INF_NORM5(pc_blk(p,:,:), n_ik)
-
-		  pd = FIND_BLOCK_POS(k, k)
-		  IF (pd > 0_8) THEN
-		    CALL BLOCK_INF_NORM5(pc_blk(pd,:,:), n_kk)
-		  ELSE
-		    n_kk = 1.0_8
-		  END IF
-		  n_kk = MAX(n_kk, tinyv)
-
-		  DO q = pc_row_ptr(k), pc_row_ptr(k+1_8)-1_8
-		    j = pc_col_ind(q)
-		    IF (j < 1_8 .OR. j > ncells) CYCLE
-		    IF (used(j) == 1_8) CYCLE
-		    IF (j == i) CYCLE
-
-		    CALL BLOCK_INF_NORM5(pc_blk(q,:,:), n_kj)
-		    score = (n_ik * n_kj) / n_kk
-
-		    ! 累计候选：同一j取最大score
-		    IF (cand_cols(j) == 0_8) THEN
-		      cand_cols(j) = j
-		      cand_score(j) = score
-		    ELSE
-		      cand_score(j) = MAX(cand_score(j), score)
-		    END IF
-		  END DO
-		END DO
-
-		! 统计候选数量
-		idx = 0_8
-		DO j = 1_8, ncells
-		  IF (cand_cols(j) /= 0_8 .AND. cand_score(j) > tinyv) idx = idx + 1_8
-		END DO
-
-		kkeep = MIN(pc_ilut_extra_per_row, idx)
-		add_cnt(i) = kkeep
-	  END DO
-
-	  ! ---------- 构建新 row_ptr ----------
-	  ALLOCATE(new_row_ptr(ncells+1_8))
-	  new_row_ptr(1) = 1_8
-	  DO i = 1_8, ncells
-		nold = pc_row_ptr(i+1_8) - pc_row_ptr(i)
-		new_row_ptr(i+1_8) = new_row_ptr(i) + nold + add_cnt(i)
-	  END DO
-	  new_nnz = new_row_ptr(ncells+1_8) - 1_8
-
-	  ALLOCATE(new_col_ind(new_nnz), new_blk(new_nnz,5,5))
-	  new_col_ind = 0_8
-	  new_blk = 0.0_8
-
-	  ! ---------- Pass-2: 拷贝旧块 + 按分数选TopK新增 ----------
-	  DO i = 1_8, ncells
-		used = 0_8
-		pos = new_row_ptr(i)
-		ncur = 0_8
-
-		! 拷贝旧行
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  ncur = ncur + 1_8
-		  new_col_ind(pos+ncur-1_8) = pc_col_ind(p)
-		  new_blk(pos+ncur-1_8,:,:) = pc_blk(p,:,:)
-		  used(pc_col_ind(p)) = 1_8
-		END DO
-
-		cand_cols = 0_8
-		cand_score = 0.0_8
-		cand_bestk = 0_8
-
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  k = pc_col_ind(p)
-		  IF (k < 1_8 .OR. k > ncells) CYCLE
-
-		  CALL BLOCK_INF_NORM5(pc_blk(p,:,:), n_ik)
-		  pd = FIND_BLOCK_POS(k, k)
-		  IF (pd > 0_8) THEN
-		    CALL BLOCK_INF_NORM5(pc_blk(pd,:,:), n_kk)
-		  ELSE
-		    n_kk = 1.0_8
-		  END IF
-		  n_kk = MAX(n_kk, tinyv)
-
-		  DO q = pc_row_ptr(k), pc_row_ptr(k+1_8)-1_8
-		    j = pc_col_ind(q)
-		    IF (j < 1_8 .OR. j > ncells) CYCLE
-		    IF (used(j) == 1_8) CYCLE
-		    IF (j == i) CYCLE
-
-		    CALL BLOCK_INF_NORM5(pc_blk(q,:,:), n_kj)
-		    score = (n_ik * n_kj) / n_kk
-		    cand_cols(j) = j
-			IF (score > cand_score(j)) THEN
-			  cand_score(j) = score
-			  cand_bestk(j) = k
-			END IF
-		  END DO
-		END DO
-
-		! 选Top-K
-		kkeep = add_cnt(i)
-		nadd = 0_8
-		DO ii = 1_8, kkeep
-		  bestv = -1.0_8
-		  idx = -1_8
-		  DO j = 1_8, ncells
-		    IF (cand_cols(j) == 0_8) CYCLE
-		    IF (cand_score(j) > bestv) THEN
-		      bestv = cand_score(j)
-		      idx = j
-		    END IF
-		  END DO
-		  IF (idx <= 0_8) EXIT
-
-		  ncur = ncur + 1_8
-		  nadd = nadd + 1_8
-		  new_col_ind(pos+ncur-1_8) = idx
-
-			kbest = cand_bestk(idx)
-			p_ik = FIND_BLOCK_POS(i, kbest)
-			p_kj = FIND_BLOCK_POS(kbest, idx)
-			p_kk = FIND_BLOCK_POS(kbest, kbest)
-
-			fill55 = 0.0_8
-			IF (kbest > 0_8 .AND. p_ik > 0_8 .AND. p_kj > 0_8 .AND. p_kk > 0_8) THEN
-			  Aik = pc_blk(p_ik,:,:)
-			  Akj = pc_blk(p_kj,:,:)
-			  Akk = pc_blk(p_kk,:,:)
-			  CALL INVERT_5X5(Akk, Akk_inv, inv_ok)
-			  IF (inv_ok) THEN
-				CALL MATMUL5(Aik, Akk_inv, tmp55)
-				CALL MATMUL5(tmp55, Akj, fill55)
-				fill55 = -fill55
-			  END IF
-			END IF
-			new_blk(pos+ncur-1_8,:,:) = fill55
-
-			cand_cols(idx) = 0_8
-			cand_score(idx) = 0.0_8
-			cand_bestk(idx) = 0_8
-		END DO
-	  END DO
-		DO w = 1_8, ncells
-		  IF (new_row_ptr(w+1_8) - new_row_ptr(w) > 1_8) THEN
-			CALL PC_SORT_ROW_WITH_BLK(new_col_ind, new_blk, new_row_ptr(w), new_row_ptr(w+1_8)-1_8)
-		  END IF
-		END DO
-	  ! ---------- 回写 ----------
-	  DEALLOCATE(pc_row_ptr, pc_col_ind, pc_blk)
-	  ALLOCATE(pc_row_ptr(ncells+1_8), pc_col_ind(new_nnz), pc_blk(new_nnz,5,5))
-	  pc_row_ptr = new_row_ptr
-	  pc_col_ind = new_col_ind
-	  pc_blk = new_blk
-
-	  DEALLOCATE(add_cnt, new_row_ptr, new_col_ind, new_blk, used)
-	  IF (ALLOCATED(cand_cols)) DEALLOCATE(cand_cols)
-		IF (ALLOCATED(cand_score)) DEALLOCATE(cand_score)
-		IF (ALLOCATED(cand_bestk)) DEALLOCATE(cand_bestk)
-	END SUBROUTINE BUILD_ILUT_PATTERN_LITE
-	SUBROUTINE BLOCK_INF_NORM5(A, nrm)
-	  IMPLICIT NONE
-	  REAL(kind=8), INTENT(IN) :: A(5,5)
-	  REAL(kind=8), INTENT(OUT) :: nrm
-	  INTEGER(kind=8) :: i, j
-	  REAL(kind=8) :: rowsum
-
-	  nrm = 0.0_8
-	  DO i = 1_8, 5_8
-		rowsum = 0.0_8
-		DO j = 1_8, 5_8
-		  rowsum = rowsum + ABS(A(i,j))
-		END DO
-		nrm = MAX(nrm, rowsum)
-	  END DO
-	END SUBROUTINE BLOCK_INF_NORM5
-
-	SUBROUTINE PCDBG_PRINT_MAT5(tag, A)
-	  IMPLICIT NONE
-	  CHARACTER(len=*), INTENT(IN) :: tag
-	  REAL(kind=8), INTENT(IN) :: A(5,5)
-	  INTEGER :: r
-	  PRINT *, '[PC-DBG-5X5] ', TRIM(tag)
-	  DO r = 1, 5
-		PRINT '(A,I1,A,5(1X,ES14.6))', ' row', r, ':', A(r,1), A(r,2), A(r,3), A(r,4), A(r,5)
-	  END DO
-	END SUBROUTINE PCDBG_PRINT_MAT5
-	SUBROUTINE APPLY_PC_BLOCK_EQUIL(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-
-	  INTEGER(kind=8) :: i, j, p, it, maxit
-	  REAL(kind=8), ALLOCATABLE :: rown(:), coln(:)
-	  REAL(kind=8) :: bnrm, tinyv, scaleL, scaleR
-	  REAL(kind=8) :: row_min, row_max, col_min, col_max, spread_tol
-	  REAL(kind=8) :: scale_cap_hi, scale_cap_lo
-
-	  tinyv = 1.0d-30
-	  spread_tol = 1.20d0
-	  ! 限幅避免局部极端尺度把 ILU 主元链再次拉坏
-	  scale_cap_hi = 5.0d0
-	  scale_cap_lo = 1.0d0 / scale_cap_hi
-	  maxit = MAX(6_8, pc_equil_iters)
-
-	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
-	  IF (SIZE(pc_row_ptr) < ncells+1_8) RETURN
-
-	  IF (ALLOCATED(pc_eqL)) DEALLOCATE(pc_eqL)
-	  IF (ALLOCATED(pc_eqR)) DEALLOCATE(pc_eqR)
-	  ALLOCATE(pc_eqL(ncells), pc_eqR(ncells))
-	  pc_eqL = 1.0_8
-	  pc_eqR = 1.0_8
-
-	  ALLOCATE(rown(ncells), coln(ncells))
-
-	  DO it = 1_8, maxit
-		rown = 0.0_8
-		coln = 0.0_8
-
-		! 统计当前矩阵的行/列块范数（块∞范数最大值）
-		DO i = 1_8, ncells
-		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		    j = pc_col_ind(p)
-		    CALL BLOCK_INF_NORM5(pc_blk(p,:,:), bnrm)
-		    rown(i) = MAX(rown(i), bnrm)
-		    IF (j >= 1_8 .AND. j <= ncells) coln(j) = MAX(coln(j), bnrm)
-		  END DO
-		END DO
-
-		row_min = HUGE(1.0_8)
-		row_max = 0.0_8
-		col_min = HUGE(1.0_8)
-		col_max = 0.0_8
-		DO i = 1_8, ncells
-		  row_min = MIN(row_min, MAX(rown(i), tinyv))
-		  row_max = MAX(row_max, rown(i))
-		  col_min = MIN(col_min, MAX(coln(i), tinyv))
-		  col_max = MAX(col_max, coln(i))
-		END DO
-
-		IF (it > pc_equil_iters) THEN
-		  IF (row_max/row_min <= spread_tol .AND. col_max/col_min <= spread_tol) EXIT
-		END IF
-
-		! 行缩放：A_ij <- s_i * A_ij
-		DO i = 1_8, ncells
-		  scaleL = 1.0_8 / SQRT(MAX(rown(i), tinyv))
-		  scaleL = MIN(scale_cap_hi, MAX(scale_cap_lo, scaleL))
-		  pc_eqL(i) = pc_eqL(i) * scaleL
-		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		    pc_blk(p,:,:) = scaleL * pc_blk(p,:,:)
-		  END DO
-		END DO
-
-		! 关键修正：行缩放后重算列范数，再做列缩放
-		coln = 0.0_8
-		DO i = 1_8, ncells
-		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		    j = pc_col_ind(p)
-		    IF (j < 1_8 .OR. j > ncells) CYCLE
-		    CALL BLOCK_INF_NORM5(pc_blk(p,:,:), bnrm)
-		    coln(j) = MAX(coln(j), bnrm)
-		  END DO
-		END DO
-
-		! 列缩放：A_ij <- A_ij * t_j
-		DO i = 1_8, ncells
-		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		    j = pc_col_ind(p)
-		    IF (j < 1_8 .OR. j > ncells) CYCLE
-		    scaleR = 1.0_8 / SQRT(MAX(coln(j), tinyv))
-		    scaleR = MIN(scale_cap_hi, MAX(scale_cap_lo, scaleR))
-		    pc_blk(p,:,:) = pc_blk(p,:,:) * scaleR
-		  END DO
-		END DO
-
-		! 累积记录右缩放
-		DO j = 1_8, ncells
-		  scaleR = 1.0_8 / SQRT(MAX(coln(j), tinyv))
-		  scaleR = MIN(scale_cap_hi, MAX(scale_cap_lo, scaleR))
-		  pc_eqR(j) = pc_eqR(j) * scaleR
-		END DO
-	  END DO
-
-	  DEALLOCATE(rown, coln)
-	END SUBROUTINE APPLY_PC_BLOCK_EQUIL
-	SUBROUTINE PC_DAMP_OFFDIAG_TOPK(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-
-	  INTEGER(kind=8) :: i, j, p, pd, row_nnz, k, kk, pmax
-	  INTEGER(kind=8) :: nkeep, noff
-	  INTEGER(kind=8), ALLOCATABLE :: off_p(:), keep_flag(:)
-	  REAL(kind=8), ALLOCATABLE :: off_nrm(:)
-	  REAL(kind=8) :: ndiag, nblk, tinyv, capv, fac, drop_th, vmax
-	  LOGICAL :: is_kept
-
-	  tinyv = 1.0d-30
-
-	  IF (.NOT. ALLOCATED(pc_row_ptr)) RETURN
-	  IF (.NOT. ALLOCATED(pc_col_ind)) RETURN
-	  IF (.NOT. ALLOCATED(pc_blk)) RETURN
-	  IF (.NOT. ALLOCATED(pc_diag_pos)) RETURN
-	  IF (SIZE(pc_diag_pos) < ncells) RETURN
-
-	  DO i = 1_8, ncells
-		pd = pc_diag_pos(i)
-		IF (pd > 0_8) THEN
-		  CALL BLOCK_INF_NORM5(pc_blk(pd,:,:), ndiag)
-		ELSE
-		  ndiag = 1.0_8
-		END IF
-		ndiag = MAX(ndiag, tinyv)
-
-		row_nnz = pc_row_ptr(i+1_8) - pc_row_ptr(i)
-		IF (row_nnz <= 1_8) CYCLE
-
-		ALLOCATE(off_p(row_nnz), off_nrm(row_nnz), keep_flag(row_nnz))
-		off_p = 0_8
-		off_nrm = 0.0_8
-		keep_flag = 0_8
-		noff = 0_8
-
-		! 收集该行所有非对角块及其范数
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  j = pc_col_ind(p)
-		  IF (j == i) CYCLE
-		  noff = noff + 1_8
-		  off_p(noff) = p
-		  CALL BLOCK_INF_NORM5(pc_blk(p,:,:), off_nrm(noff))
-		END DO
-
-		IF (noff > 0_8) THEN
-		  ! Step-1: 保留 Top-K 强块
-		  nkeep = MIN(pc_keep_topk, noff)
-		  DO kk = 1_8, nkeep
-		    vmax = -1.0_8
-		    pmax = -1_8
-		    DO k = 1_8, noff
-		      IF (keep_flag(k) == 1_8) CYCLE
-		      IF (off_nrm(k) > vmax) THEN
-		        vmax = off_nrm(k)
-		        pmax = k
-		      END IF
-		    END DO
-		    IF (pmax > 0_8) keep_flag(pmax) = 1_8
-		  END DO
-
-		  ! Step-2: 阈值删除 + 限幅（Top-K 也参与限幅）
-		  drop_th = pc_drop_rel * ndiag
-		  capv = pc_offdiag_cap * ndiag
-
-		  DO k = 1_8, noff
-		    p = off_p(k)
-		    nblk = off_nrm(k)
-		    is_kept = (keep_flag(k) == 1_8)
-
-		    ! 非Top-K且低于阈值 -> 删除
-		    IF ((.NOT. is_kept) .AND. (nblk < drop_th)) THEN
-		      pc_blk(p,:,:) = 0.0_8
-		      CYCLE
-		    END IF
-
-		    ! 统一限幅（避免个别超大非对角导致ILU不稳）
-		    IF (nblk > capv) THEN
-		      fac = capv / MAX(nblk, tinyv)
-		      pc_blk(p,:,:) = fac * pc_blk(p,:,:)
-		    END IF
-		  END DO
-		END IF
-
-		DEALLOCATE(off_p, off_nrm, keep_flag)
-	  END DO
-	END SUBROUTINE PC_DAMP_OFFDIAG_TOPK
-	SUBROUTINE PC_ENFORCE_BLOCK_GERSH_SHIFT(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  INTEGER(kind=8) :: i, p, pp, j, k, nshift
-	  REAL(kind=8) :: ndiag, offsum, nblk, targetv, addv, capv, tinyv
-	  REAL(kind=8) :: sum_add
-	  tinyv = 1.0d-30
-	  nshift = 0_8
-	  sum_add = 0.0_8
-	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. &
-	  &   .NOT. ALLOCATED(pc_diag_pos) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
-	  DO i = 1_8, ncells
-		p = pc_diag_pos(i)
-		IF (p <= 0_8) CYCLE
-		CALL BLOCK_INF_NORM5(pc_blk(p,:,:), ndiag)
-		offsum = 0.0_8
-		DO pp = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  j = pc_col_ind(pp)
-		  IF (j == i) CYCLE
-		  CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
-		  offsum = offsum + nblk
-		END DO
-		targetv = pc_gersh_theta * offsum
-		IF (ndiag < targetv) THEN
-		  addv = targetv - ndiag
-		  capv = pc_gersh_cap_rel * MAX(offsum, tinyv)
-		  addv = MIN(addv, capv)
-		  IF (addv > 0.0_8) THEN
-			DO k = 1_8, 5_8
-			  pc_blk(p,k,k) = pc_blk(p,k,k) + addv
-			END DO
-			nshift = nshift + 1_8
-			sum_add = sum_add + addv
-		  END IF
-		END IF
-	  END DO
-	  PRINT *, '[PC-GERSH] rows_shifted=', nshift, ' avg_add=', sum_add/MAX(1_8,nshift)
-	END SUBROUTINE PC_ENFORCE_BLOCK_GERSH_SHIFT
-	SUBROUTINE PC_COARSE_CORRECT_5(ncells, r, e)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  REAL(kind=8), INTENT(IN) :: r(:)
-	  REAL(kind=8), INTENT(OUT) :: e(:)
-	  INTEGER(kind=8) :: i, a, b
-	  REAL(kind=8) :: rc(5), ec(5)
-
-	  e = 0.0_8
-	  IF (.NOT. pc_coarse_ready) RETURN
-
-	  rc = 0.0_8
-	  DO i = 1_8, ncells
-		DO a = 1_8, 5_8
-		  rc(a) = rc(a) + r((i-1_8)*5 + a)
-		END DO
-	  END DO
-
-	  ec = 0.0_8
-	  DO a = 1_8, 5_8
-		DO b = 1_8, 5_8
-		  ec(a) = ec(a) + pc_Ac_inv(a,b) * rc(b)
-		END DO
-	  END DO
-
-	  DO i = 1_8, ncells
-		DO a = 1_8, 5_8
-		  e((i-1_8)*5 + a) = ec(a)
-		END DO
-	  END DO
-	END SUBROUTINE PC_COARSE_CORRECT_5
-	SUBROUTINE PC_BUILD_COARSE_5(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  INTEGER(kind=8) :: i, p, j, a, b
-	  LOGICAL :: okinv
-
-	  IF (ALLOCATED(pc_Ac)) DEALLOCATE(pc_Ac)
-	  IF (ALLOCATED(pc_Ac_inv)) DEALLOCATE(pc_Ac_inv)
-	  ALLOCATE(pc_Ac(5,5), pc_Ac_inv(5,5))
-	  pc_Ac = 0.0_8
-	  pc_Ac_inv = 0.0_8
-
-	  DO i = 1_8, ncells
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-		  j = pc_col_ind(p)
-		  DO a = 1_8, 5_8
-		    DO b = 1_8, 5_8
-		      pc_Ac(a,b) = pc_Ac(a,b) + pc_blk(p,a,b)
-		    END DO
-		  END DO
-		END DO
-	  END DO
-
-	  ! 极小正则，防止5x5粗矩阵奇异
-	  DO a = 1_8, 5_8
-		pc_Ac(a,a) = pc_Ac(a,a) + 1.0d-12
-	  END DO
-
-	  CALL INVERT_5X5(pc_Ac, pc_Ac_inv, okinv)
-	  pc_coarse_ready = okinv
-	  IF (.NOT. okinv) THEN
-		pc_coarse_ready = .FALSE.
-		PRINT *, '[PC-2L] coarse 5x5 inversion failed, disable coarse correction.'
-	  ELSE
-		PRINT *, '[PC-2L] coarse 5x5 ready.'
-	  END IF
-	END SUBROUTINE PC_BUILD_COARSE_5
-	SUBROUTINE PC_APPLY_A0(ncells, x, y)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  REAL(kind=8), INTENT(IN)  :: x(:)
-	  REAL(kind=8), INTENT(OUT) :: y(:)
-
-	  INTEGER(kind=8) :: i, p, j
-	  REAL(kind=8) :: tmp(5)
-
+	  ALLOCATE(y(ncells,5))
 	  y = 0.0_8
-
-	  ! A0 不可用就返回 0（或可改成 y=x 视你习惯）
-	  IF (.NOT. pc_a0_ready) RETURN
-	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_a0_blk)) RETURN
-	  IF (SIZE(y) < 5_8*ncells .OR. SIZE(x) < 5_8*ncells) RETURN
+	  vec_out = 0.0_8
 
 	  DO i = 1_8, ncells
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1)-1_8
+		rhs = vec_in((i-1)*5+1:(i-1)*5+5)
+		DO p = pc_row_ptr(i), pc_row_ptr(i+1)-1
 		  j = pc_col_ind(p)
-		  CALL MATVEC5(pc_a0_blk(p,:,:), x((j-1_8)*5_8+1_8:(j-1_8)*5_8+5_8), tmp)
-		  y((i-1_8)*5_8+1_8:(i-1_8)*5_8+5_8) = y((i-1_8)*5_8+1_8:(i-1_8)*5_8+5_8) + tmp
+		  IF (j < i) THEN
+		    CALL MATVEC5(pc_blk(p,:,:), y(j,:), tmp)
+		    rhs = rhs - tmp
+		  END IF
 		END DO
-	  END DO
-	END SUBROUTINE PC_APPLY_A0
-  SUBROUTINE PC_APPLY_DIAG_ONLY(ncells, rhs_in, z_out)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    REAL(kind=8), INTENT(IN) :: rhs_in(:)
-    REAL(kind=8), INTENT(OUT) :: z_out(:)
-    INTEGER(kind=8) :: i
-    IF (.NOT. ALLOCATED(pc_diag_inv)) THEN
-      z_out = rhs_in
-      RETURN
-    END IF
-    IF (SIZE(pc_diag_inv, 1) < ncells) THEN
-      z_out = rhs_in
-      RETURN
-    END IF
-    DO i = 1_8, ncells
-      CALL MATVEC5(pc_diag_inv(i, :, :), rhs_in((i-1_8)*5_8+1_8:(i-1_8)*5_8+5_8), &
-      & z_out((i-1_8)*5_8+1_8:(i-1_8)*5_8+5_8))
-    END DO
-  END SUBROUTINE PC_APPLY_DIAG_ONLY
-	SUBROUTINE PC_BUILD_AGG_MAP(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  INTEGER(kind=8) :: i
-
-	  IF (pc_nagg < 1_8) pc_nagg = 1_8
-	  IF (pc_nagg > ncells) pc_nagg = ncells
-
-	  IF (ALLOCATED(pc_agg_id)) DEALLOCATE(pc_agg_id)
-	  ALLOCATE(pc_agg_id(ncells))
-
-	  ! 简单均匀聚合：先用这个稳定版
-	  DO i = 1_8, ncells
-		pc_agg_id(i) = 1_8 + MOD(i-1_8, pc_nagg)
+		y(i,:) = rhs
 	  END DO
 
-	  pc_nc = 5_8 * pc_nagg
-	END SUBROUTINE PC_BUILD_AGG_MAP
-	SUBROUTINE PC_BUILD_COARSE_AGG(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  INTEGER(kind=8) :: i, j, p, a, b, agi, agj, ia, jb
-	  LOGICAL :: okinv
-	  REAL(kind=8) :: diag_mean, tr
-
-	  pc_coarse_ready = .FALSE.
-	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
-      IF (pc_use_coarse_pv_schur) THEN
-        CALL PC_BUILD_COARSE_PV_SCHUR(ncells)
-        RETURN
-      END IF
-
-	  CALL PC_BUILD_AGG_MAP(ncells)
-	  IF (pc_nc <= 0_8) RETURN
-
-	  IF (ALLOCATED(pc_Ac)) DEALLOCATE(pc_Ac)
-	  IF (ALLOCATED(pc_Ac_inv)) DEALLOCATE(pc_Ac_inv)
-	  ALLOCATE(pc_Ac(pc_nc, pc_nc), pc_Ac_inv(pc_nc, pc_nc))
-	  pc_Ac = 0.0_8
-	  pc_Ac_inv = 0.0_8
-
-	  ! Ac = R A P，按聚合块组装
-	  DO i = 1_8, ncells
-		agi = pc_agg_id(i)
-		DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+	  DO i = ncells, 1_8, -1_8
+		rhs = y(i,:)
+		DO p = pc_row_ptr(i), pc_row_ptr(i+1)-1
 		  j = pc_col_ind(p)
-		  IF (j < 1_8 .OR. j > ncells) CYCLE
-		  agj = pc_agg_id(j)
-
-		  DO a = 1_8, 5_8
-		    ia = (agi-1_8)*5_8 + a
-		    DO b = 1_8, 5_8
-		      jb = (agj-1_8)*5_8 + b
-		      pc_Ac(ia, jb) = pc_Ac(ia, jb) + pc_blk(p, a, b)
-		    END DO
-		  END DO
+		  IF (j > i) THEN
+		    CALL MATVEC5(pc_blk(p,:,:), vec_out((j-1_8)*5+1:(j-1_8)*5+5), tmp)
+		    rhs = rhs - tmp
+		  END IF
 		END DO
+		CALL MATVEC5(pc_uinv(i,:,:), rhs, vec_out((i-1)*5+1:(i-1)*5+5))
 	  END DO
 
-	  ! 小对角正则（按平均迹量级）
-	  tr = 0.0_8
-	  DO ia = 1_8, pc_nc
-		tr = tr + ABS(pc_Ac(ia, ia))
-	  END DO
-	  diag_mean = tr / MAX(1.0_8, REAL(pc_nc, kind=8))
-	  IF (diag_mean <= 1.0d-30) diag_mean = 1.0_8
-	  DO ia = 1_8, pc_nc
-		pc_Ac(ia, ia) = pc_Ac(ia, ia) + 1.0d-12 * diag_mean
-	  END DO
-
-	  CALL INVERT_DENSE(pc_Ac, pc_Ac_inv, okinv)
-	  pc_coarse_ready = okinv
-	  IF (.NOT. okinv) THEN
-		PRINT *, '[PC-2L] coarse inversion failed, disable coarse correction.'
-	  ELSE
-		PRINT *, '[PC-2L] coarse ready: nc=', pc_nc, ' nagg=', pc_nagg
-	  END IF
-	END SUBROUTINE PC_BUILD_COARSE_AGG
-	SUBROUTINE PC_COARSE_CORRECT_AGG(ncells, r_in, e_out)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  REAL(kind=8), INTENT(IN) :: r_in(:)
-	  REAL(kind=8), INTENT(OUT) :: e_out(:)
-
-	  INTEGER(kind=8) :: i, a, b, agi, ia, jb
-	  REAL(kind=8), ALLOCATABLE :: rc(:), ec(:)
-
-	  e_out = 0.0_8
-      IF (pc_use_coarse_pv_schur) THEN
-        CALL PC_COARSE_CORRECT_PV_SCHUR(ncells, r_in, e_out)
-        RETURN
-      END IF
-	  IF (.NOT. pc_coarse_ready) RETURN
-	  IF (.NOT. ALLOCATED(pc_agg_id)) RETURN
-
-	  ALLOCATE(rc(pc_nc), ec(pc_nc))
-	  rc = 0.0_8
-	  ec = 0.0_8
-
-	  ! rc = R * r （按聚合求和）
-	  DO i = 1_8, ncells
-		agi = pc_agg_id(i)
-		DO a = 1_8, 5_8
-		  ia = (agi-1_8)*5_8 + a
-		  rc(ia) = rc(ia) + r_in((i-1_8)*5_8 + a)
-		END DO
-	  END DO
-
-	  ! ec = Ac^{-1} * rc
-	  DO ia = 1_8, pc_nc
-		DO jb = 1_8, pc_nc
-		  ec(ia) = ec(ia) + pc_Ac_inv(ia, jb) * rc(jb)
-		END DO
-	  END DO
-
-	  ! e = P * ec（聚合常数延拓）
-	  DO i = 1_8, ncells
-		agi = pc_agg_id(i)
-		DO a = 1_8, 5_8
-		  ia = (agi-1_8)*5_8 + a
-		  e_out((i-1_8)*5_8 + a) = ec(ia)
-		END DO
-	  END DO
-
-	  DEALLOCATE(rc, ec)
-	END SUBROUTINE PC_COARSE_CORRECT_AGG
-    SUBROUTINE PC_BUILD_COARSE_PV_SCHUR(ncells)
-      IMPLICIT NONE
-      INTEGER(kind=8), INTENT(IN) :: ncells
-      INTEGER(kind=8) :: i, j, p, agi, agj, pd, ncoarse, m, f, ownercell, neighbourcell
-      REAL(kind=8) :: epsd, diag_mean, tr, app, dotv, offsum, target, area_face, dist_on, wlap
-      REAL(kind=8) :: lap_diag_mean, lap_scale, blend_w
-      REAL(kind=8) :: xmin, xmax, ymin, ymax, zmin, zmax, dx, dy, dz, xn, yn, zn, xi
-      REAL(kind=8) :: Apu_i(4), Aup_j(4), Auu4(4,4), Auu4_inv(4,4), tmp4(4)
-      REAL(kind=8) :: sij
-      LOGICAL :: ok4, okinv
-      REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:), Ac_lap(:,:), Ac_mass(:)
-
-      pc_coarse_ready = .FALSE.
-      IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_diag_pos)) RETURN
-
-      CALL PC_BUILD_AGG_MAP(ncells)
-      ncoarse = pc_nagg
-      IF (ncoarse <= 0_8) RETURN
-
-      IF (ALLOCATED(pc_Ac_p)) DEALLOCATE(pc_Ac_p)
-      IF (ALLOCATED(pc_Ac_p_inv)) DEALLOCATE(pc_Ac_p_inv)
-      ALLOCATE(pc_Ac_p(ncoarse, ncoarse), pc_Ac_p_inv(ncoarse, ncoarse))
-      pc_Ac_p = 0.0_8
-      pc_Ac_p_inv = 0.0_8
-      pc_nc = ncoarse
-      epsd = MAX(1.0d-30, pc_pschur_diag_eps)
-
-      IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-        ALLOCATE(Ablk(SIZE(pc_a0_blk,1),5,5))
-        Ablk = pc_a0_blk
-      ELSEIF (ALLOCATED(pc_blk)) THEN
-        ALLOCATE(Ablk(SIZE(pc_blk,1),5,5))
-        Ablk = pc_blk
-      ELSE
-        RETURN
-      END IF
-
-      DO i = 1_8, ncells
-        pd = pc_diag_pos(i)
-        IF (pd <= 0_8) CYCLE
-        agi = pc_agg_id(i)
-        Apu_i(1) = Ablk(pd,1,2)
-        Apu_i(2) = Ablk(pd,1,3)
-        Apu_i(3) = Ablk(pd,1,4)
-        Apu_i(4) = Ablk(pd,1,5)
-
-        Auu4(1,1) = Ablk(pd,2,2); Auu4(1,2) = Ablk(pd,2,3); Auu4(1,3) = Ablk(pd,2,4); Auu4(1,4) = Ablk(pd,2,5)
-        Auu4(2,1) = Ablk(pd,3,2); Auu4(2,2) = Ablk(pd,3,3); Auu4(2,3) = Ablk(pd,3,4); Auu4(2,4) = Ablk(pd,3,5)
-        Auu4(3,1) = Ablk(pd,4,2); Auu4(3,2) = Ablk(pd,4,3); Auu4(3,3) = Ablk(pd,4,4); Auu4(3,4) = Ablk(pd,4,5)
-        Auu4(4,1) = Ablk(pd,5,2); Auu4(4,2) = Ablk(pd,5,3); Auu4(4,3) = Ablk(pd,5,4); Auu4(4,4) = Ablk(pd,5,5)
-        DO m = 1_8, 4_8
-          Auu4(m,m) = Auu4(m,m) + pc_pcd_u_diag_boost * MAX(ABS(Auu4(m,m)), epsd)
-        END DO
-        CALL INVERT_DENSE(Auu4, Auu4_inv, ok4)
-        IF (.NOT. ok4) THEN
-          Auu4_inv = 0.0_8
-          Auu4_inv(1,1)=1.0_8/epsd; Auu4_inv(2,2)=1.0_8/epsd
-          Auu4_inv(3,3)=1.0_8/epsd; Auu4_inv(4,4)=1.0_8/epsd
-        END IF
-
-        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-          j = pc_col_ind(p)
-          IF (j < 1_8 .OR. j > ncells) CYCLE
-          agj = pc_agg_id(j)
-          app = Ablk(p,1,1)
-          Aup_j(1) = Ablk(p,2,1)
-          Aup_j(2) = Ablk(p,3,1)
-          Aup_j(3) = Ablk(p,4,1)
-          Aup_j(4) = Ablk(p,5,1)
-          tmp4 = MATMUL(Auu4_inv, Aup_j)
-          dotv = Apu_i(1)*tmp4(1) + Apu_i(2)*tmp4(2) + Apu_i(3)*tmp4(3) + Apu_i(4)*tmp4(4)
-          sij = app - dotv
-          pc_Ac_p(agi, agj) = pc_Ac_p(agi, agj) + sij
-        END DO
-      END DO
-
-      ! PCD/LSC-inspired coarse Schur shaping:
-      ! blend algebraic Schur with a geometric pressure Laplacian and pressure-mass proxy.
-      IF (pc_use_pcd_lsc_mix) THEN
-        ALLOCATE(Ac_lap(ncoarse, ncoarse), Ac_mass(ncoarse))
-        Ac_lap = 0.0_8
-        Ac_mass = 0.0_8
-
-        IF (ALLOCATED(faces_mesh) .AND. ALLOCATED(favecs_mesh) .AND. ALLOCATED(ccenters_mesh)) THEN
-          DO f = 1_8, SIZE(faces_mesh,1)
-            ownercell = faces_mesh(f,1)
-            neighbourcell = faces_mesh(f,2)
-            IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
-            IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
-
-            agi = pc_agg_id(ownercell)
-            agj = pc_agg_id(neighbourcell)
-            IF (agi <= 0_8 .OR. agj <= 0_8) CYCLE
-
-            area_face = SQRT(favecs_mesh(f,1)**2 + favecs_mesh(f,2)**2 + favecs_mesh(f,3)**2)
-            dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
-            &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
-            &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
-            dist_on = MAX(dist_on, 1.0d-12)
-            wlap = area_face / dist_on
-            IF (wlap <= 0.0_8) CYCLE
-
-            Ac_lap(agi, agi) = Ac_lap(agi, agi) + wlap
-            Ac_lap(agj, agj) = Ac_lap(agj, agj) + wlap
-            Ac_lap(agi, agj) = Ac_lap(agi, agj) - wlap
-            Ac_lap(agj, agi) = Ac_lap(agj, agi) - wlap
-          END DO
-        END IF
-
-        DO i = 1_8, ncells
-          pd = pc_diag_pos(i)
-          IF (pd <= 0_8) CYCLE
-          agi = pc_agg_id(i)
-          Ac_mass(agi) = Ac_mass(agi) + MAX(0.0_8, ABS(Ablk(pd,1,1)))
-        END DO
-
-        tr = 0.0_8
-        DO agi = 1_8, ncoarse
-          tr = tr + ABS(pc_Ac_p(agi,agi))
-        END DO
-        diag_mean = tr / MAX(1.0_8, REAL(ncoarse, kind=8))
-        IF (diag_mean <= epsd) diag_mean = 1.0_8
-
-        lap_diag_mean = 0.0_8
-        DO agi = 1_8, ncoarse
-          lap_diag_mean = lap_diag_mean + ABS(Ac_lap(agi,agi))
-        END DO
-        lap_diag_mean = lap_diag_mean / MAX(1.0_8, REAL(ncoarse, kind=8))
-        blend_w = MIN(0.90_8, MAX(0.0_8, pc_pcd_laplace_blend))
-        IF (lap_diag_mean > epsd) THEN
-          lap_scale = diag_mean / lap_diag_mean
-          DO agi = 1_8, ncoarse
-            DO agj = 1_8, ncoarse
-              pc_Ac_p(agi, agj) = (1.0_8 - blend_w) * pc_Ac_p(agi, agj) + &
-              & blend_w * lap_scale * Ac_lap(agi, agj)
-            END DO
-          END DO
-        END IF
-        DO agi = 1_8, ncoarse
-          pc_Ac_p(agi, agi) = pc_Ac_p(agi, agi) + pc_pcd_mass_beta * Ac_mass(agi)
-        END DO
-        DEALLOCATE(Ac_lap, Ac_mass)
-      END IF
-
-      tr = 0.0_8
-      DO agi = 1_8, ncoarse
-        tr = tr + ABS(pc_Ac_p(agi, agi))
-      END DO
-      diag_mean = tr / MAX(1.0_8, REAL(ncoarse, kind=8))
-      IF (diag_mean <= epsd) diag_mean = 1.0_8
-
-      DO agi = 1_8, ncoarse
-        offsum = 0.0_8
-        DO agj = 1_8, ncoarse
-          IF (agj == agi) CYCLE
-          offsum = offsum + ABS(pc_Ac_p(agi, agj))
-        END DO
-        target = 0.85_8 * offsum
-        IF (ABS(pc_Ac_p(agi, agi)) < target) THEN
-          pc_Ac_p(agi, agi) = pc_Ac_p(agi, agi) + (target - ABS(pc_Ac_p(agi, agi)))
-        END IF
-        pc_Ac_p(agi, agi) = pc_Ac_p(agi, agi) + 1.0d-10 * diag_mean
-      END DO
-
-      CALL INVERT_DENSE(pc_Ac_p, pc_Ac_p_inv, okinv)
-      pc_coarse_ready = okinv
-      IF (pc_coarse_ready) THEN
-        PRINT *, '[PC-2L-PSCHUR] coarse ready: nagg=', pc_nagg, ' vel_relax=', pc_coarse_pv_vel_relax
-      ELSE
-        PRINT *, '[PC-2L-PSCHUR] coarse inversion failed, disable coarse correction.'
-      END IF
-
-      IF (pc_use_coarse_div_mode) THEN
-        IF (ALLOCATED(pc_div_basis)) DEALLOCATE(pc_div_basis)
-        ALLOCATE(pc_div_basis(ncells, MAX(1_8, pc_div_modes)))
-        pc_div_basis = 0.0_8
-
-        IF (ALLOCATED(ccenters_mesh) .AND. SIZE(ccenters_mesh,1) >= ncells .AND. SIZE(ccenters_mesh,2) >= 3) THEN
-          xmin = MINVAL(ccenters_mesh(1:ncells,1)); xmax = MAXVAL(ccenters_mesh(1:ncells,1))
-          ymin = MINVAL(ccenters_mesh(1:ncells,2)); ymax = MAXVAL(ccenters_mesh(1:ncells,2))
-          zmin = MINVAL(ccenters_mesh(1:ncells,3)); zmax = MAXVAL(ccenters_mesh(1:ncells,3))
-          dx = MAX(xmax-xmin, 1.0d-30); dy = MAX(ymax-ymin, 1.0d-30); dz = MAX(zmax-zmin, 1.0d-30)
-          DO i = 1_8, ncells
-            xn = (ccenters_mesh(i,1) - xmin) / dx
-            yn = (ccenters_mesh(i,2) - ymin) / dy
-            zn = (ccenters_mesh(i,3) - zmin) / dz
-            IF (pc_div_modes >= 1_8) pc_div_basis(i,1) = 2.0_8*xn - 1.0_8
-            IF (pc_div_modes >= 2_8) pc_div_basis(i,2) = 2.0_8*yn - 1.0_8
-            IF (pc_div_modes >= 3_8) pc_div_basis(i,3) = 2.0_8*zn - 1.0_8
-            DO m = 4_8, pc_div_modes
-              pc_div_basis(i,m) = SIN(REAL(m,kind=8) * 3.141592653589793_8 * xn)
-            END DO
-          END DO
-        ELSE
-          DO i = 1_8, ncells
-            xi = REAL(i-1_8,kind=8) / MAX(1.0_8, REAL(ncells-1_8,kind=8))
-            IF (pc_div_modes >= 1_8) pc_div_basis(i,1) = 2.0_8*xi - 1.0_8
-            IF (pc_div_modes >= 2_8) pc_div_basis(i,2) = COS(2.0_8*3.141592653589793_8*xi)
-            IF (pc_div_modes >= 3_8) pc_div_basis(i,3) = SIN(2.0_8*3.141592653589793_8*xi)
-            DO m = 4_8, pc_div_modes
-              pc_div_basis(i,m) = SIN(REAL(m,kind=8) * 3.141592653589793_8 * xi)
-            END DO
-          END DO
-        END IF
-        PRINT *, '[PC-2L-DIV] modes ready=', pc_div_modes
-      ELSE
-        IF (ALLOCATED(pc_div_basis)) DEALLOCATE(pc_div_basis)
-      END IF
-
-      IF (ALLOCATED(Ablk)) DEALLOCATE(Ablk)
-    END SUBROUTINE PC_BUILD_COARSE_PV_SCHUR
-    SUBROUTINE PC_COARSE_CORRECT_PV_SCHUR(ncells, r_in, e_out)
-      IMPLICIT NONE
-      INTEGER(kind=8), INTENT(IN) :: ncells
-      REAL(kind=8), INTENT(IN) :: r_in(:)
-      REAL(kind=8), INTENT(OUT) :: e_out(:)
-      INTEGER(kind=8) :: i, agi, agj, pd, ncoarse, m
-      REAL(kind=8), ALLOCATABLE :: rc(:), ec(:)
-      REAL(kind=8) :: epsd, dp_i, numer, denom, amp
-      REAL(kind=8) :: Auu4(4,4), Auu4_inv(4,4), Aup_i(4), rhs4(4), du4(4)
-      LOGICAL :: ok4
-      REAL(kind=8), ALLOCATABLE :: Ablk(:,:,:)
-
-      e_out = 0.0_8
-      IF (.NOT. pc_coarse_ready) RETURN
-      IF (.NOT. ALLOCATED(pc_agg_id)) RETURN
-      IF (.NOT. ALLOCATED(pc_Ac_p_inv)) RETURN
-
-      ncoarse = pc_nagg
-      IF (ncoarse <= 0_8) RETURN
-      epsd = MAX(1.0d-30, pc_pschur_diag_eps)
-
-      ALLOCATE(rc(ncoarse), ec(ncoarse))
-      rc = 0.0_8
-      ec = 0.0_8
-
-      DO i = 1_8, ncells
-        agi = pc_agg_id(i)
-        rc(agi) = rc(agi) + r_in((i-1_8)*5_8 + 1_8)
-      END DO
-
-      DO agi = 1_8, ncoarse
-        DO agj = 1_8, ncoarse
-          ec(agi) = ec(agi) + pc_Ac_p_inv(agi, agj) * rc(agj)
-        END DO
-      END DO
-
-      DO i = 1_8, ncells
-        agi = pc_agg_id(i)
-        e_out((i-1_8)*5_8 + 1_8) = ec(agi)
-      END DO
-      IF (pc_use_coarse_div_mode .AND. ALLOCATED(pc_div_basis)) THEN
-        DO m = 1_8, MIN(pc_div_modes, SIZE(pc_div_basis,2))
-          numer = 0.0_8
-          denom = 1.0d-30
-          DO i = 1_8, ncells
-            numer = numer + r_in((i-1_8)*5_8 + 1_8) * pc_div_basis(i,m)
-            denom = denom + pc_div_basis(i,m) * pc_div_basis(i,m)
-          END DO
-          amp = pc_div_rhs_blend * numer / denom
-          DO i = 1_8, ncells
-            e_out((i-1_8)*5_8 + 1_8) = e_out((i-1_8)*5_8 + 1_8) + amp * pc_div_basis(i,m)
-            e_out((i-1_8)*5_8 + 3_8) = e_out((i-1_8)*5_8 + 3_8) + pc_div_mode_vel_gain * amp * pc_div_basis(i,m)
-            e_out((i-1_8)*5_8 + 4_8) = e_out((i-1_8)*5_8 + 4_8) - pc_div_mode_vel_gain * amp * pc_div_basis(i,m)
-          END DO
-        END DO
-      END IF
-
-      IF (pc_coarse_pv_vel_relax > 0.0_8 .AND. ALLOCATED(pc_diag_pos)) THEN
-        IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-          ALLOCATE(Ablk(SIZE(pc_a0_blk,1),5,5))
-          Ablk = pc_a0_blk
-        ELSEIF (ALLOCATED(pc_blk)) THEN
-          ALLOCATE(Ablk(SIZE(pc_blk,1),5,5))
-          Ablk = pc_blk
-        END IF
-        IF (ALLOCATED(Ablk)) THEN
-          DO i = 1_8, ncells
-            pd = pc_diag_pos(i)
-            IF (pd <= 0_8) CYCLE
-            dp_i = ec(pc_agg_id(i))
-            IF (ABS(dp_i) <= 1.0d-30) CYCLE
-
-            Auu4(1,1) = Ablk(pd,2,2); Auu4(1,2) = Ablk(pd,2,3); Auu4(1,3) = Ablk(pd,2,4); Auu4(1,4) = Ablk(pd,2,5)
-            Auu4(2,1) = Ablk(pd,3,2); Auu4(2,2) = Ablk(pd,3,3); Auu4(2,3) = Ablk(pd,3,4); Auu4(2,4) = Ablk(pd,3,5)
-            Auu4(3,1) = Ablk(pd,4,2); Auu4(3,2) = Ablk(pd,4,3); Auu4(3,3) = Ablk(pd,4,4); Auu4(3,4) = Ablk(pd,4,5)
-            Auu4(4,1) = Ablk(pd,5,2); Auu4(4,2) = Ablk(pd,5,3); Auu4(4,3) = Ablk(pd,5,4); Auu4(4,4) = Ablk(pd,5,5)
-            CALL INVERT_DENSE(Auu4, Auu4_inv, ok4)
-            IF (.NOT. ok4) THEN
-              Auu4_inv = 0.0_8
-              Auu4_inv(1,1)=1.0_8/MAX(ABS(Auu4(1,1)),epsd)
-              Auu4_inv(2,2)=1.0_8/MAX(ABS(Auu4(2,2)),epsd)
-              Auu4_inv(3,3)=1.0_8/MAX(ABS(Auu4(3,3)),epsd)
-              Auu4_inv(4,4)=1.0_8/MAX(ABS(Auu4(4,4)),epsd)
-            END IF
-
-            Aup_i(1) = Ablk(pd,2,1)
-            Aup_i(2) = Ablk(pd,3,1)
-            Aup_i(3) = Ablk(pd,4,1)
-            Aup_i(4) = Ablk(pd,5,1)
-            rhs4 = -dp_i * Aup_i
-            du4 = MATMUL(Auu4_inv, rhs4)
-            e_out((i-1_8)*5_8 + 2_8:(i-1_8)*5_8 + 5_8) = e_out((i-1_8)*5_8 + 2_8:(i-1_8)*5_8 + 5_8) + &
-            & pc_coarse_pv_vel_relax * du4
-          END DO
-          DEALLOCATE(Ablk)
-        END IF
-      END IF
-
-      DEALLOCATE(rc, ec)
-    END SUBROUTINE PC_COARSE_CORRECT_PV_SCHUR
-    SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA(ncells)
-      IMPLICIT NONE
-      INTEGER(kind=8), INTENT(IN) :: ncells
-      INTEGER(kind=8) :: i, j, f, p, pd, ownercell, neighbourcell
-      REAL(kind=8) :: epsd, area_face, dist_on
-      REAL(kind=8) :: Auu4(4,4), Apu4(4), Aup4(4), tmp4(4), sch_diag
-      LOGICAL :: ok4
-      REAL(kind=8), ALLOCATABLE :: sp_lap_diag(:), sp_lap_off(:), sch_diag_add(:)
-
-      epsd = MAX(1.0d-30, pc_pschur_diag_eps)
-
-      ! ---- U-block inverse used by split Schur (velocity block approx inverse) ----
-      ALLOCATE(sch_diag_add(ncells))
-      sch_diag_add = 0.0_8
-      IF (ALLOCATED(pc_duu_inv)) DEALLOCATE(pc_duu_inv)
-      ALLOCATE(pc_duu_inv(ncells,4,4))
-      pc_duu_inv = 0.0_8
-
-      DO i = 1_8, ncells
-        pd = pc_diag_pos(i)
-        IF (pd <= 0_8) THEN
-          pc_duu_inv(i,1,1) = 1.0_8 / epsd
-          pc_duu_inv(i,2,2) = 1.0_8 / epsd
-          pc_duu_inv(i,3,3) = 1.0_8 / epsd
-          pc_duu_inv(i,4,4) = 1.0_8 / epsd
-          CYCLE
-        END IF
-        IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-          Auu4(1,1) = pc_a0_blk(pd,2,2); Auu4(1,2) = pc_a0_blk(pd,2,3); Auu4(1,3) = pc_a0_blk(pd,2,4); Auu4(1,4) = pc_a0_blk(pd,2,5)
-          Auu4(2,1) = pc_a0_blk(pd,3,2); Auu4(2,2) = pc_a0_blk(pd,3,3); Auu4(2,3) = pc_a0_blk(pd,3,4); Auu4(2,4) = pc_a0_blk(pd,3,5)
-          Auu4(3,1) = pc_a0_blk(pd,4,2); Auu4(3,2) = pc_a0_blk(pd,4,3); Auu4(3,3) = pc_a0_blk(pd,4,4); Auu4(3,4) = pc_a0_blk(pd,4,5)
-          Auu4(4,1) = pc_a0_blk(pd,5,2); Auu4(4,2) = pc_a0_blk(pd,5,3); Auu4(4,3) = pc_a0_blk(pd,5,4); Auu4(4,4) = pc_a0_blk(pd,5,5)
-        ELSE
-          Auu4(1,1) = pc_blk(pd,2,2); Auu4(1,2) = pc_blk(pd,2,3); Auu4(1,3) = pc_blk(pd,2,4); Auu4(1,4) = pc_blk(pd,2,5)
-          Auu4(2,1) = pc_blk(pd,3,2); Auu4(2,2) = pc_blk(pd,3,3); Auu4(2,3) = pc_blk(pd,3,4); Auu4(2,4) = pc_blk(pd,3,5)
-          Auu4(3,1) = pc_blk(pd,4,2); Auu4(3,2) = pc_blk(pd,4,3); Auu4(3,3) = pc_blk(pd,4,4); Auu4(3,4) = pc_blk(pd,4,5)
-          Auu4(4,1) = pc_blk(pd,5,2); Auu4(4,2) = pc_blk(pd,5,3); Auu4(4,3) = pc_blk(pd,5,4); Auu4(4,4) = pc_blk(pd,5,5)
-        END IF
-        DO j = 1_8, 4_8
-          Auu4(j,j) = Auu4(j,j) + pc_schur_u_diag_boost * MAX(ABS(Auu4(j,j)), epsd)
-        END DO
-        CALL INVERT_DENSE(Auu4, pc_duu_inv(i,:,:), ok4)
-        IF (.NOT. ok4) THEN
-          pc_duu_inv(i,:,:) = 0.0_8
-          pc_duu_inv(i,1,1) = 1.0_8 / MAX(ABS(Auu4(1,1)), epsd)
-          pc_duu_inv(i,2,2) = 1.0_8 / MAX(ABS(Auu4(2,2)), epsd)
-          pc_duu_inv(i,3,3) = 1.0_8 / MAX(ABS(Auu4(3,3)), epsd)
-          pc_duu_inv(i,4,4) = 1.0_8 / MAX(ABS(Auu4(4,4)), epsd)
-        END IF
-        ! Add local Schur diagonal coupling: S_ii += A_pu * U_ii^{-1} * A_up
-        IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-          Apu4(1) = pc_a0_blk(pd,1,2)
-          Apu4(2) = pc_a0_blk(pd,1,3)
-          Apu4(3) = pc_a0_blk(pd,1,4)
-          Apu4(4) = pc_a0_blk(pd,1,5)
-          Aup4(1) = pc_a0_blk(pd,2,1)
-          Aup4(2) = pc_a0_blk(pd,3,1)
-          Aup4(3) = pc_a0_blk(pd,4,1)
-          Aup4(4) = pc_a0_blk(pd,5,1)
-        ELSE
-          Apu4(1) = pc_blk(pd,1,2)
-          Apu4(2) = pc_blk(pd,1,3)
-          Apu4(3) = pc_blk(pd,1,4)
-          Apu4(4) = pc_blk(pd,1,5)
-          Aup4(1) = pc_blk(pd,2,1)
-          Aup4(2) = pc_blk(pd,3,1)
-          Aup4(3) = pc_blk(pd,4,1)
-          Aup4(4) = pc_blk(pd,5,1)
-        END IF
-        tmp4 = MATMUL(pc_duu_inv(i,:,:), Aup4)
-        sch_diag = DOT_PRODUCT(Apu4, tmp4)
-        IF (sch_diag > 0.0_8) sch_diag_add(i) = pc_schur_diag_couple * sch_diag
-      END DO
-
-      ! ---- Explicit pressure Laplacian (face geometry) replaces algebraic Sp ----
-      ALLOCATE(sp_lap_diag(ncells), sp_lap_off(SIZE(pc_col_ind)))
-      sp_lap_diag = 0.0_8
-      sp_lap_off = 0.0_8
-
-      IF (.NOT. ALLOCATED(faces_mesh) .OR. .NOT. ALLOCATED(favecs_mesh) .OR. .NOT. ALLOCATED(ccenters_mesh)) THEN
-        ! fallback to algebraic Schur if geometry unavailable
-        DO i = 1_8, ncells
-          sp_lap_diag(i) = MAX(epsd, ABS(pc_sp_diag(i)))
-        END DO
-      ELSE
-        DO f = 1_8, SIZE(faces_mesh,1)
-          ownercell = faces_mesh(f,1)
-          neighbourcell = faces_mesh(f,2)
-          IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
-          IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
-
-          area_face = SQRT(favecs_mesh(f,1)**2 + favecs_mesh(f,2)**2 + favecs_mesh(f,3)**2)
-          dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
-          &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
-          &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
-          dist_on = MAX(dist_on, 1.0d-12)
-          p = area_face / dist_on
-          IF (p <= 0.0_8) CYCLE
-
-          sp_lap_diag(ownercell) = sp_lap_diag(ownercell) + p
-          sp_lap_diag(neighbourcell) = sp_lap_diag(neighbourcell) + p
-
-          pd = FIND_BLOCK_POS(ownercell, neighbourcell)
-          IF (pd > 0_8) sp_lap_off(pd) = sp_lap_off(pd) - p
-          pd = FIND_BLOCK_POS(neighbourcell, ownercell)
-          IF (pd > 0_8) sp_lap_off(pd) = sp_lap_off(pd) - p
-        END DO
-        DO i = 1_8, ncells
-          sp_lap_diag(i) = MAX(sp_lap_diag(i), epsd)
-        END DO
-      END IF
-
-      DO i = 1_8, ncells
-        sp_lap_diag(i) = sp_lap_diag(i) + sch_diag_add(i)
-      END DO
-
-      ! Weakly couple pressure neighbors through local Schur couplings on mesh graph.
-      DO i = 1_8, ncells
-        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-          j = pc_col_ind(p)
-          IF (j == i) CYCLE
-          sp_lap_off(p) = sp_lap_off(p) - 0.10d0 * pc_schur_diag_couple * SQRT(sp_lap_diag(i) * sp_lap_diag(j))
-        END DO
-      END DO
-      DO i = 1_8, ncells
-        sch_diag = 0.0_8
-        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-          j = pc_col_ind(p)
-          IF (j == i) CYCLE
-          sch_diag = sch_diag + ABS(sp_lap_off(p))
-        END DO
-        sp_lap_diag(i) = MAX(sp_lap_diag(i), pc_pschur_diag_eps + sch_diag)
-      END DO
-
-      pc_sp_diag = sp_lap_diag
-      pc_sp_off = sp_lap_off
-      pc_sp_ready = .TRUE.
-      DEALLOCATE(sp_lap_diag, sp_lap_off, sch_diag_add)
-
-      PRINT *, '[PC-SCHUR] split data ready.'
-    END SUBROUTINE PC_BUILD_SCHUR_SPLIT_DATA
-    SUBROUTINE PC_APPLY_SCHUR_SPLIT(ncells, rhs_in, z_out)
-      IMPLICIT NONE
-      INTEGER(kind=8), INTENT(IN) :: ncells
-      REAL(kind=8), INTENT(IN) :: rhs_in(:)
-      REAL(kind=8), INTENT(OUT) :: z_out(:)
-      INTEGER(kind=8) :: i, j, p, it
-      REAL(kind=8), ALLOCATABLE :: dp(:), dp_old(:), rp_tilde(:)
-      REAL(kind=8), ALLOCATABLE :: du_pred(:, :), rhs_u(:, :)
-      REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), dz(:)
-      REAL(kind=8) :: rhs_s, tinyv, omg_u
-      REAL(kind=8) :: apu(4), aup(4), sum4(4), du4(4), rhs4(4)
-      REAL(kind=8) :: Auu_ij(4,4)
-
-      z_out = 0.0_8
-      IF (.NOT. pc_sp_ready) RETURN
-      IF (.NOT. ALLOCATED(pc_sp_diag) .OR. .NOT. ALLOCATED(pc_sp_off)) RETURN
-      IF (.NOT. ALLOCATED(pc_duu_inv)) RETURN
-
-      tinyv = MAX(1.0d-30, pc_pschur_diag_eps)
-      ALLOCATE(dp(ncells), dp_old(ncells), rp_tilde(ncells), du_pred(ncells,4), rhs_u(ncells,4))
-      dp = 0.0_8
-      dp_old = 0.0_8
-      rp_tilde = 0.0_8
-      du_pred = 0.0_8
-      rhs_u = 0.0_8
-
-      DO i = 1_8, ncells
-        du4(1) = rhs_in((i-1_8)*5_8 + 2_8)
-        du4(2) = rhs_in((i-1_8)*5_8 + 3_8)
-        du4(3) = rhs_in((i-1_8)*5_8 + 4_8)
-        du4(4) = rhs_in((i-1_8)*5_8 + 5_8)
-        du_pred(i,:) = MATMUL(pc_duu_inv(i,:,:), du4)
-      END DO
-
-      DO i = 1_8, ncells
-        rp_tilde(i) = rhs_in((i-1_8)*5_8 + 1_8)
-        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-          j = pc_col_ind(p)
-          IF (j < 1_8 .OR. j > ncells) CYCLE
-          IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-            apu(1) = pc_a0_blk(p,1,2); apu(2) = pc_a0_blk(p,1,3); apu(3) = pc_a0_blk(p,1,4); apu(4) = pc_a0_blk(p,1,5)
-          ELSE
-            apu(1) = pc_blk(p,1,2); apu(2) = pc_blk(p,1,3); apu(3) = pc_blk(p,1,4); apu(4) = pc_blk(p,1,5)
-          END IF
-          rp_tilde(i) = rp_tilde(i) - DOT_PRODUCT(apu, du_pred(j,:))
-        END DO
-      END DO
-
-      DO it = 1_8, MAX(1_8, pc_schur_sweeps)
-        dp_old = dp
-        DO i = 1_8, ncells
-          rhs_s = rp_tilde(i)
-          DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-            j = pc_col_ind(p)
-            IF (j == i) CYCLE
-            rhs_s = rhs_s - pc_sp_off(p) * dp_old(j)
-          END DO
-          dp(i) = (1.0_8 - pc_schur_omega) * dp_old(i) + pc_schur_omega * &
-          & rhs_s / SIGN(MAX(ABS(pc_sp_diag(i)), tinyv), pc_sp_diag(i))
-        END DO
-      END DO
-
-      DO i = 1_8, ncells
-        z_out((i-1_8)*5_8 + 1_8) = dp(i)
-      END DO
-
-      ! velocity rhs after pressure correction: rhs_u = ru - Aup*dp
-      DO i = 1_8, ncells
-        rhs_u(i,1) = rhs_in((i-1_8)*5_8 + 2_8)
-        rhs_u(i,2) = rhs_in((i-1_8)*5_8 + 3_8)
-        rhs_u(i,3) = rhs_in((i-1_8)*5_8 + 4_8)
-        rhs_u(i,4) = rhs_in((i-1_8)*5_8 + 5_8)
-        sum4 = 0.0_8
-        DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-          j = pc_col_ind(p)
-          IF (j < 1_8 .OR. j > ncells) CYCLE
-          IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-            aup(1) = pc_a0_blk(p,2,1); aup(2) = pc_a0_blk(p,3,1); aup(3) = pc_a0_blk(p,4,1); aup(4) = pc_a0_blk(p,5,1)
-          ELSE
-            aup(1) = pc_blk(p,2,1); aup(2) = pc_blk(p,3,1); aup(3) = pc_blk(p,4,1); aup(4) = pc_blk(p,5,1)
-          END IF
-          sum4 = sum4 + aup * dp(j)
-        END DO
-        rhs_u(i,:) = rhs_u(i,:) - sum4
-        du_pred(i,:) = MATMUL(pc_duu_inv(i,:,:), rhs_u(i,:))
-      END DO
-
-      ! approximate U^{-1} using block Gauss-Seidel sweeps on U-subsystem
-      omg_u = MIN(1.0_8, MAX(0.10_8, pc_schur_u_omega))
-      DO it = 1_8, MAX(1_8, pc_schur_u_sweeps)
-        DO i = 1_8, ncells
-          rhs4 = rhs_u(i,:)
-          DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-            j = pc_col_ind(p)
-            IF (j < 1_8 .OR. j > ncells) CYCLE
-            IF (j == i) CYCLE
-            IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3)
-              Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
-              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3)
-              Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
-              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3)
-              Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
-              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3)
-              Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
-            ELSE
-              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3)
-              Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
-              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3)
-              Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
-              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3)
-              Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
-              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3)
-              Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
-            END IF
-            rhs4 = rhs4 - MATMUL(Auu_ij, du_pred(j,:))
-          END DO
-          du4 = MATMUL(pc_duu_inv(i,:,:), rhs4)
-          du_pred(i,:) = (1.0_8 - omg_u) * du_pred(i,:) + omg_u * du4
-        END DO
-        DO i = ncells, 1_8, -1_8
-          rhs4 = rhs_u(i,:)
-          DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-            j = pc_col_ind(p)
-            IF (j < 1_8 .OR. j > ncells) CYCLE
-            IF (j == i) CYCLE
-            IF (pc_a0_ready .AND. ALLOCATED(pc_a0_blk)) THEN
-              Auu_ij(1,1) = pc_a0_blk(p,2,2); Auu_ij(1,2) = pc_a0_blk(p,2,3)
-              Auu_ij(1,3) = pc_a0_blk(p,2,4); Auu_ij(1,4) = pc_a0_blk(p,2,5)
-              Auu_ij(2,1) = pc_a0_blk(p,3,2); Auu_ij(2,2) = pc_a0_blk(p,3,3)
-              Auu_ij(2,3) = pc_a0_blk(p,3,4); Auu_ij(2,4) = pc_a0_blk(p,3,5)
-              Auu_ij(3,1) = pc_a0_blk(p,4,2); Auu_ij(3,2) = pc_a0_blk(p,4,3)
-              Auu_ij(3,3) = pc_a0_blk(p,4,4); Auu_ij(3,4) = pc_a0_blk(p,4,5)
-              Auu_ij(4,1) = pc_a0_blk(p,5,2); Auu_ij(4,2) = pc_a0_blk(p,5,3)
-              Auu_ij(4,3) = pc_a0_blk(p,5,4); Auu_ij(4,4) = pc_a0_blk(p,5,5)
-            ELSE
-              Auu_ij(1,1) = pc_blk(p,2,2); Auu_ij(1,2) = pc_blk(p,2,3)
-              Auu_ij(1,3) = pc_blk(p,2,4); Auu_ij(1,4) = pc_blk(p,2,5)
-              Auu_ij(2,1) = pc_blk(p,3,2); Auu_ij(2,2) = pc_blk(p,3,3)
-              Auu_ij(2,3) = pc_blk(p,3,4); Auu_ij(2,4) = pc_blk(p,3,5)
-              Auu_ij(3,1) = pc_blk(p,4,2); Auu_ij(3,2) = pc_blk(p,4,3)
-              Auu_ij(3,3) = pc_blk(p,4,4); Auu_ij(3,4) = pc_blk(p,4,5)
-              Auu_ij(4,1) = pc_blk(p,5,2); Auu_ij(4,2) = pc_blk(p,5,3)
-              Auu_ij(4,3) = pc_blk(p,5,4); Auu_ij(4,4) = pc_blk(p,5,5)
-            END IF
-            rhs4 = rhs4 - MATMUL(Auu_ij, du_pred(j,:))
-          END DO
-          du4 = MATMUL(pc_duu_inv(i,:,:), rhs4)
-          du_pred(i,:) = (1.0_8 - omg_u) * du_pred(i,:) + omg_u * du4
-        END DO
-      END DO
-
-      DO i = 1_8, ncells
-        z_out((i-1_8)*5_8 + 2_8) = du_pred(i,1)
-        z_out((i-1_8)*5_8 + 3_8) = du_pred(i,2)
-        z_out((i-1_8)*5_8 + 4_8) = du_pred(i,3)
-        z_out((i-1_8)*5_8 + 5_8) = du_pred(i,4)
-      END DO
-
-      IF (pc_schur_post_ilu > 0.0_8 .AND. pc_a0_ready) THEN
-        ALLOCATE(Az(ncells*5), rr(ncells*5), dz(ncells*5))
-        CALL PC_APPLY_A0(ncells, z_out, Az)
-        rr = rhs_in - Az
-        CALL PC_APPLY_M_INV(rr, dz)
-        z_out = z_out + pc_schur_post_ilu * dz
-        DEALLOCATE(Az, rr, dz)
-      END IF
-
-      DEALLOCATE(dp, dp_old, rp_tilde, du_pred, rhs_u)
-    END SUBROUTINE PC_APPLY_SCHUR_SPLIT
-
-  SUBROUTINE PC_ASM_RELEASE
-    IMPLICIT NONE
-    INTEGER(kind=8) :: ip, np
-    pc_asm_ready = .FALSE.
-    IF (ALLOCATED(pc_asm_wcount)) DEALLOCATE(pc_asm_wcount)
-    IF (.NOT. ALLOCATED(pc_asm_dom)) RETURN
-    np = INT(SIZE(pc_asm_dom), KIND=8)
-    DO ip = 1_8, np
-      IF (ALLOCATED(pc_asm_dom(ip)%glob_cell)) DEALLOCATE(pc_asm_dom(ip)%glob_cell)
-      IF (ALLOCATED(pc_asm_dom(ip)%row_ptr)) DEALLOCATE(pc_asm_dom(ip)%row_ptr)
-      IF (ALLOCATED(pc_asm_dom(ip)%col_ind)) DEALLOCATE(pc_asm_dom(ip)%col_ind)
-      IF (ALLOCATED(pc_asm_dom(ip)%diag_pos)) DEALLOCATE(pc_asm_dom(ip)%diag_pos)
-      IF (ALLOCATED(pc_asm_dom(ip)%blk)) DEALLOCATE(pc_asm_dom(ip)%blk)
-      IF (ALLOCATED(pc_asm_dom(ip)%uinv)) DEALLOCATE(pc_asm_dom(ip)%uinv)
-    END DO
-    DEALLOCATE(pc_asm_dom)
-  END SUBROUTINE PC_ASM_RELEASE
-
-  SUBROUTINE PC_ASM_SORT_INTS8(a, n)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(INOUT) :: a(:)
-    INTEGER(kind=8), INTENT(IN) :: n
-    IF (n > 1_8) CALL PC_SORT_INSERT_I8(a, 1_8, n)
-  END SUBROUTINE PC_ASM_SORT_INTS8
-
-  SUBROUTINE FACTOR_ASM_DOM_ILU0(dom, ok)
-    IMPLICIT NONE
-    TYPE(PC_ASM_DOM_T), INTENT(INOUT) :: dom
-    LOGICAL, INTENT(OUT) :: ok
-    INTEGER(kind=8) :: nloc, li, lj, lk, p_ij, p_ik, p_kj
-    INTEGER(kind=8) :: ri, rj, rk
-    REAL(kind=8) :: T(5, 5), S(5, 5)
-    LOGICAL :: inv_ok
-
-    ok = .TRUE.
-    nloc = dom%nloc
-    IF (nloc <= 0_8 .OR. (.NOT. ALLOCATED(dom%row_ptr))) THEN
-      ok = .FALSE.
-      RETURN
-    END IF
-
-    DO li = 1_8, nloc
-      ri = dom%glob_cell(li)
-
-      DO p_ij = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-        lj = dom%col_ind(p_ij)
-        rj = dom%glob_cell(lj)
-        IF (rj >= ri) CYCLE
-        T = dom%blk(p_ij, :, :)
-        DO p_ik = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-          lk = dom%col_ind(p_ik)
-          rk = dom%glob_cell(lk)
-          IF (lk <= 0_8 .OR. rk >= rj) CYCLE
-          p_kj = FIND_ASM_BLOCK_POS(dom, lk, lj)
-          IF (p_kj > 0_8) THEN
-            CALL MATMUL5(dom%blk(p_ik, :, :), dom%blk(p_kj, :, :), S)
-            T = T - S
-          END IF
-        END DO
-        CALL MATMUL5(T, dom%uinv(lj, :, :), dom%blk(p_ij, :, :))
-      END DO
-
-      p_ij = dom%diag_pos(li)
-      IF (p_ij <= 0_8) THEN
-        ok = .FALSE.
-        RETURN
-      END IF
-      T = dom%blk(p_ij, :, :)
-      DO p_ik = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-        lk = dom%col_ind(p_ik)
-        rk = dom%glob_cell(lk)
-        IF (lk <= 0_8 .OR. rk >= ri) CYCLE
-        p_kj = FIND_ASM_BLOCK_POS(dom, lk, li)
-        IF (p_kj > 0_8) THEN
-          CALL MATMUL5(dom%blk(p_ik, :, :), dom%blk(p_kj, :, :), S)
-          T = T - S
-        END IF
-      END DO
-      dom%blk(p_ij, :, :) = T
-      CALL INVERT_5X5(dom%blk(p_ij, :, :), dom%uinv(li, :, :), inv_ok)
-      IF (.NOT. inv_ok) THEN
-        ok = .FALSE.
-        RETURN
-      END IF
-
-      DO p_ij = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-        lj = dom%col_ind(p_ij)
-        rj = dom%glob_cell(lj)
-        IF (rj <= ri) CYCLE
-        T = dom%blk(p_ij, :, :)
-        DO p_ik = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-          lk = dom%col_ind(p_ik)
-          rk = dom%glob_cell(lk)
-          IF (lk <= 0_8 .OR. rk >= ri) CYCLE
-          p_kj = FIND_ASM_BLOCK_POS(dom, lk, lj)
-          IF (p_kj > 0_8) THEN
-            CALL MATMUL5(dom%blk(p_ik, :, :), dom%blk(p_kj, :, :), S)
-            T = T - S
-          END IF
-        END DO
-        dom%blk(p_ij, :, :) = T
-      END DO
-    END DO
-  END SUBROUTINE FACTOR_ASM_DOM_ILU0
-
-  SUBROUTINE PC_APPLY_ASM_DOM_SOL(dom, vec_in, vec_out)
-    IMPLICIT NONE
-    TYPE(PC_ASM_DOM_T), INTENT(IN) :: dom
-    REAL(kind=8), INTENT(IN) :: vec_in(:)
-    REAL(kind=8), INTENT(OUT) :: vec_out(:)
-    INTEGER(kind=8) :: nloc, li, lj, p
-    INTEGER(kind=8) :: ri, rj
-    REAL(kind=8), ALLOCATABLE :: y(:, :)
-    REAL(kind=8) :: rhs(5), tmp(5)
-
-    nloc = dom%nloc
-    IF (nloc <= 0_8 .OR. SIZE(vec_in) < nloc*5_8 .OR. SIZE(vec_out) < nloc*5_8) THEN
-      vec_out = 0.0_8
-      RETURN
-    END IF
-    ALLOCATE(y(nloc, 5))
-    y = 0.0_8
-    vec_out(1:nloc*5_8) = 0.0_8
-    DO li = 1_8, nloc
-      rhs = vec_in((li - 1_8)*5_8 + 1_8:(li - 1_8)*5_8 + 5_8)
-      ri = dom%glob_cell(li)
-      DO p = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-        lj = dom%col_ind(p)
-        rj = dom%glob_cell(lj)
-        IF (rj < ri) THEN
-          CALL MATVEC5(dom%blk(p, :, :), y(lj, :), tmp)
-          rhs = rhs - tmp
-        END IF
-      END DO
-      y(li, :) = rhs
-    END DO
-    DO li = nloc, 1_8, -1_8
-      rhs = y(li, :)
-      ri = dom%glob_cell(li)
-      DO p = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-        lj = dom%col_ind(p)
-        rj = dom%glob_cell(lj)
-        IF (rj > ri) THEN
-          CALL MATVEC5(dom%blk(p, :, :), vec_out((lj - 1_8)*5_8 + 1_8:(lj - 1_8)*5_8 + 5_8), tmp)
-          rhs = rhs - tmp
-        END IF
-      END DO
-      CALL MATVEC5(dom%uinv(li, :, :), rhs, vec_out((li - 1_8)*5_8 + 1_8:(li - 1_8)*5_8 + 5_8))
-    END DO
-    DEALLOCATE(y)
-  END SUBROUTINE PC_APPLY_ASM_DOM_SOL
-
-  SUBROUTINE PC_ASM_BUILD_FROM_A0(ncells)
-    IMPLICIT NONE
-    INTEGER(kind=8), INTENT(IN) :: ncells
-    INTEGER(kind=8) :: meshinfo(4), nfaces, nbdry, nparts, ip, layer, f
-    INTEGER(kind=8) :: c, o, nb, k, gi, gj, lj, li, nloc, p, ic, i0
-    INTEGER(kind=8) :: max_ext_use, ov_try, ov_used_part, ov_min_all
-    LOGICAL, ALLOCATABLE :: seed(:), ext(:), newm(:)
-    INTEGER(kind=8), ALLOCATABLE :: inv_map(:), row_len(:)
-    LOGICAL :: okd
-    INTEGER(kind=8) :: npi
-
-    CALL PC_ASM_RELEASE
-    IF (.NOT. pc_use_asm_subdomain_ilu) THEN
-      PRINT *, '[PC-ASM] off: pc_use_asm_subdomain_ilu=F'
-      RETURN
-    END IF
-    IF (.NOT. pc_a0_ready .OR. .NOT. ALLOCATED(pc_a0_blk)) THEN
-      PRINT *, '[PC-ASM] skip: pc_a0 not ready'
-      RETURN
-    END IF
-    IF (.NOT. pc_ready .OR. ncells /= pc_ncells) THEN
-      PRINT *, '[PC-ASM] skip: pc_ready/F or ncells mismatch ncells=', ncells, ' pc_ncells=', pc_ncells
-      RETURN
-    END IF
-    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind)) THEN
-      PRINT *, '[PC-ASM] skip: CSR not allocated'
-      RETURN
-    END IF
-    IF (ncells <= 0_8) RETURN
-
-    CALL UNSTRUCTUREDMESHINFO(meshinfo)
-    nfaces = meshinfo(2)
-    nbdry = meshinfo(4)
-    IF (nfaces <= nbdry .OR. nfaces <= 0_8) THEN
-      PRINT *, '[PC-ASM] skip: invalid mesh face count nfaces=', nfaces, ' nbdry=', nbdry
-      RETURN
-    END IF
-
-    nparts = pc_asm_nparts
-    IF (nparts < 1_8) nparts = 1_8
-    IF (nparts > ncells) nparts = ncells
-
-    max_ext_use = ncells
-    IF (pc_asm_max_ext_cells > 0_8) max_ext_use = pc_asm_max_ext_cells
-    ov_min_all = pc_asm_overlap_layers
-
-    ALLOCATE(pc_asm_wcount(ncells))
-    pc_asm_wcount = 0_8
-    ALLOCATE(pc_asm_dom(nparts))
-    DO ip = 1_8, nparts
-      pc_asm_dom(ip)%nloc = 0_8
-      pc_asm_dom(ip)%nnzb = 0_8
-    END DO
-
-    ALLOCATE(seed(ncells), ext(ncells), newm(ncells), inv_map(ncells))
-    DO ip = 1_8, nparts
-      ov_used_part = -1_8
-      DO ov_try = pc_asm_overlap_layers, 0_8, -1_8
-        seed = .FALSE.
-        ext = .FALSE.
-        newm = .FALSE.
-        DO c = 1_8, ncells
-          IF (MOD(c - 1_8, nparts) + 1_8 == ip) seed(c) = .TRUE.
-        END DO
-        ext = seed
-        DO layer = 1_8, MAX(0_8, ov_try)
-          newm = .FALSE.
-          DO f = 1_8, nfaces - nbdry
-            o = faces_mesh(f, 1)
-            nb = faces_mesh(f, 2)
-            IF (o < 1_8 .OR. o > ncells .OR. nb < 1_8 .OR. nb > ncells) CYCLE
-            IF (ext(o) .AND. (.NOT. ext(nb))) newm(nb) = .TRUE.
-            IF (ext(nb) .AND. (.NOT. ext(o))) newm(o) = .TRUE.
-          END DO
-          WHERE (newm)
-            ext = .TRUE.
-          END WHERE
-        END DO
-        nloc = 0_8
-        DO c = 1_8, ncells
-          IF (ext(c)) nloc = nloc + 1_8
-        END DO
-        IF (nloc <= max_ext_use) THEN
-          ov_used_part = ov_try
-          ov_min_all = MIN(ov_min_all, ov_try)
-          EXIT
-        END IF
-      END DO
-      IF (ov_used_part < 0_8) THEN
-        PRINT *, '[PC-ASM] abort: nloc > max_ext even at overlap=0  part=', ip, ' nloc=', nloc, ' max_ext=', max_ext_use, &
-          & ' (increase pc_asm_max_ext_cells or ncells cap)'
-        CALL PC_ASM_RELEASE
-        DEALLOCATE(seed, ext, newm, inv_map)
-        RETURN
-      END IF
-      IF (ov_used_part < pc_asm_overlap_layers) THEN
-        PRINT *, '[PC-ASM] part=', ip, ' shrink overlap ', pc_asm_overlap_layers, ' -> ', ov_used_part, ' nloc=', nloc, &
-          & ' max_ext=', max_ext_use
-      END IF
-      IF (nloc <= 0_8) CYCLE
-      ALLOCATE(pc_asm_dom(ip)%glob_cell(nloc))
-      k = 0_8
-      DO c = 1_8, ncells
-        IF (ext(c)) THEN
-          k = k + 1_8
-          pc_asm_dom(ip)%glob_cell(k) = c
-        END IF
-      END DO
-      CALL PC_ASM_SORT_INTS8(pc_asm_dom(ip)%glob_cell, nloc)
-      DO k = 1_8, nloc
-        c = pc_asm_dom(ip)%glob_cell(k)
-        pc_asm_wcount(c) = pc_asm_wcount(c) + 1_8
-      END DO
-      pc_asm_dom(ip)%nloc = nloc
-      inv_map = 0_8
-      DO k = 1_8, nloc
-        inv_map(pc_asm_dom(ip)%glob_cell(k)) = k
-      END DO
-      ALLOCATE(row_len(nloc))
-      row_len = 0_8
-      DO li = 1_8, nloc
-        gi = pc_asm_dom(ip)%glob_cell(li)
-        DO p = pc_row_ptr(gi), pc_row_ptr(gi + 1_8) - 1_8
-          gj = pc_col_ind(p)
-          IF (gj >= 1_8 .AND. gj <= ncells) THEN
-            lj = inv_map(gj)
-            IF (lj > 0_8) row_len(li) = row_len(li) + 1_8
-          END IF
-        END DO
-      END DO
-      ALLOCATE(pc_asm_dom(ip)%row_ptr(nloc + 1_8))
-      pc_asm_dom(ip)%row_ptr(1) = 1_8
-      DO li = 1_8, nloc
-        pc_asm_dom(ip)%row_ptr(li + 1_8) = pc_asm_dom(ip)%row_ptr(li) + row_len(li)
-      END DO
-      pc_asm_dom(ip)%nnzb = pc_asm_dom(ip)%row_ptr(nloc + 1_8) - 1_8
-      DEALLOCATE(row_len)
-      npi = pc_asm_dom(ip)%nnzb
-      ALLOCATE(pc_asm_dom(ip)%col_ind(npi), pc_asm_dom(ip)%blk(npi, 5, 5), pc_asm_dom(ip)%diag_pos(nloc), &
-        & pc_asm_dom(ip)%uinv(nloc, 5, 5))
-      pc_asm_dom(ip)%blk = 0.0_8
-      pc_asm_dom(ip)%uinv = 0.0_8
-      pc_asm_dom(ip)%diag_pos = 0_8
-      DO li = 1_8, nloc
-        i0 = pc_asm_dom(ip)%row_ptr(li)
-        ic = 0_8
-        gi = pc_asm_dom(ip)%glob_cell(li)
-        DO p = pc_row_ptr(gi), pc_row_ptr(gi + 1_8) - 1_8
-          gj = pc_col_ind(p)
-          IF (gj < 1_8 .OR. gj > ncells) CYCLE
-          lj = inv_map(gj)
-          IF (lj <= 0_8) CYCLE
-          ic = ic + 1_8
-          pc_asm_dom(ip)%col_ind(i0 + ic - 1_8) = lj
-          pc_asm_dom(ip)%blk(i0 + ic - 1_8, :, :) = pc_a0_blk(p, :, :)
-        END DO
-        IF (ic /= pc_asm_dom(ip)%row_ptr(li + 1_8) - pc_asm_dom(ip)%row_ptr(li)) THEN
-          PRINT *, '[PC-ASM] internal row fill mismatch part=', ip, ' li=', li, ' ic=', ic, ' row_nnz=', &
-            & pc_asm_dom(ip)%row_ptr(li + 1_8) - pc_asm_dom(ip)%row_ptr(li)
-        END IF
-        IF (ic > 0_8) CALL PC_SORT_ROW_WITH_BLK(pc_asm_dom(ip)%col_ind, pc_asm_dom(ip)%blk, i0, i0 + ic - 1_8)
-      END DO
-      DO li = 1_8, nloc
-        pc_asm_dom(ip)%diag_pos(li) = FIND_ASM_BLOCK_POS(pc_asm_dom(ip), li, li)
-      END DO
-      CALL FACTOR_ASM_DOM_ILU0(pc_asm_dom(ip), okd)
-      IF (.NOT. okd) THEN
-        PRINT *, '[PC-ASM] factor failed part=', ip
-        CALL PC_ASM_RELEASE
-        DEALLOCATE(seed, ext, newm, inv_map)
-        RETURN
-      END IF
-    END DO
-    DEALLOCATE(seed, ext, newm, inv_map)
-    pc_asm_ready = .TRUE.
-    pc_asm_build_id = pc_asm_build_id + 1_8
-    PRINT *, '[PC-ASM] ready build_id=', pc_asm_build_id, ' nparts=', nparts, ' overlap_req=', pc_asm_overlap_layers, &
-      & ' overlap_eff_min=', ov_min_all, ' max_ext_use=', max_ext_use, ' (pc_asm_max_ext_cells=', pc_asm_max_ext_cells, &
-      & ') blend_w_ilu=', pc_asm_blend_global_ilu
-  END SUBROUTINE PC_ASM_BUILD_FROM_A0
-
-  SUBROUTINE PC_APPLY_ASM_ADDITIVE_WEIGHTED(vec_in, vec_out)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: vec_in(:)
-    REAL(kind=8), INTENT(OUT) :: vec_out(:)
-    INTEGER(kind=8) :: ncells, ip, k, gi, np
-    REAL(kind=8) :: wt
-    REAL(kind=8), ALLOCATABLE :: rr_loc(:), dz_loc(:)
-
-    ncells = SIZE(vec_in)/5_8
-    vec_out = 0.0_8
-    np = INT(SIZE(pc_asm_dom), KIND=8)
-    DO ip = 1_8, np
-      IF (pc_asm_dom(ip)%nloc <= 0_8) CYCLE
-      ALLOCATE(rr_loc(pc_asm_dom(ip)%nloc*5_8), dz_loc(pc_asm_dom(ip)%nloc*5_8))
-      DO k = 1_8, pc_asm_dom(ip)%nloc
-        gi = pc_asm_dom(ip)%glob_cell(k)
-        rr_loc((k - 1_8)*5_8 + 1_8:k*5_8) = vec_in((gi - 1_8)*5_8 + 1_8:gi*5_8)
-      END DO
-      CALL PC_APPLY_ASM_DOM_SOL(pc_asm_dom(ip), rr_loc, dz_loc)
-      DO k = 1_8, pc_asm_dom(ip)%nloc
-        gi = pc_asm_dom(ip)%glob_cell(k)
-        wt = 1.0_8/REAL(MAX(1_8, pc_asm_wcount(gi)), 8)
-        vec_out((gi - 1_8)*5_8 + 1_8:gi*5_8) = vec_out((gi - 1_8)*5_8 + 1_8:gi*5_8) + wt*dz_loc((k - 1_8)*5_8 + 1_8:k*5_8)
-      END DO
-      DEALLOCATE(rr_loc, dz_loc)
-    END DO
-  END SUBROUTINE PC_APPLY_ASM_ADDITIVE_WEIGHTED
-
-  SUBROUTINE PC_APPLY_M_INV(vec_in, vec_out)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: vec_in(:)
-    REAL(kind=8), INTENT(OUT) :: vec_out(:)
-    INTEGER(kind=8) :: ncells
-    REAL(kind=8), ALLOCATABLE :: z_ilu(:), z_asm(:)
-    REAL(kind=8) :: wblend
-    INTEGER(kind=8), SAVE :: pc_m_inv_log_build = -1_8
-
-    ncells = SIZE(vec_in)/5_8
-    IF (.NOT. pc_ready) THEN
-      vec_out = vec_in
-      RETURN
-    END IF
-    IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. &
-      &   .NOT. ALLOCATED(pc_blk) .OR. .NOT. ALLOCATED(pc_uinv)) THEN
-      vec_out = vec_in
-      RETURN
-    END IF
-    IF (ncells /= pc_ncells) THEN
-      vec_out = vec_in
-      RETURN
-    END IF
-    IF (.NOT. pc_asm_ready .OR. (.NOT. pc_use_asm_subdomain_ilu) .OR. (.NOT. ALLOCATED(pc_asm_dom)) .OR. &
-      &   (.NOT. ALLOCATED(pc_asm_wcount))) THEN
-      IF (pc_m_inv_log_build /= pc_asm_build_id) THEN
-        IF (pc_use_asm_subdomain_ilu) THEN
-          PRINT *, '[PC-MINV] fallback global ILU (asm_ready=', pc_asm_ready, ' use_asm=', pc_use_asm_subdomain_ilu, &
-            & ' alloc_dom=', ALLOCATED(pc_asm_dom), ' wcount=', ALLOCATED(pc_asm_wcount), ') build_id=', pc_asm_build_id
-        END IF
-        pc_m_inv_log_build = pc_asm_build_id
-      END IF
-      CALL PC_APPLY_ILU_CORE(vec_in, vec_out)
-      RETURN
-    END IF
-
-    wblend = pc_asm_blend_global_ilu
-    IF (wblend < 0.0_8) wblend = 0.0_8
-    IF (wblend > 1.0_8) wblend = 1.0_8
-    ALLOCATE(z_ilu(SIZE(vec_in)), z_asm(SIZE(vec_in)))
-    CALL PC_APPLY_ILU_CORE(vec_in, z_ilu)
-    CALL PC_APPLY_ASM_ADDITIVE_WEIGHTED(vec_in, z_asm)
-    vec_out = wblend*z_ilu + (1.0_8 - wblend)*z_asm
-    IF (pc_m_inv_log_build /= pc_asm_build_id) THEN
-      PRINT *, '[PC-MINV] hybrid ILU+ASM w_ilu=', wblend, ' nparts=', SIZE(pc_asm_dom), ' overlap=', &
-        & pc_asm_overlap_layers, ' build_id=', pc_asm_build_id
-      pc_m_inv_log_build = pc_asm_build_id
-    END IF
-    DEALLOCATE(z_ilu, z_asm)
-  END SUBROUTINE PC_APPLY_M_INV
-
-SUBROUTINE PC_APPLY_ILU_CORE(vec_in, vec_out)
-  IMPLICIT NONE
-  REAL(kind=8), INTENT(IN)  :: vec_in(:)
-  REAL(kind=8), INTENT(OUT) :: vec_out(:)
-
-  INTEGER(kind=8) :: ncells, i, j, p, ii, ri, rj
-  REAL(kind=8), ALLOCATABLE :: y(:, :)
-  REAL(kind=8) :: rhs(5), tmp(5)
-
-  ncells = SIZE(vec_in) / 5
-  IF (.NOT. pc_ready) THEN
-    vec_out = vec_in
-    RETURN
-  END IF
-  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. &
-  &   .NOT. ALLOCATED(pc_blk) .OR. .NOT. ALLOCATED(pc_uinv)) THEN
-    vec_out = vec_in
-    RETURN
-  END IF
-  IF (ncells /= pc_ncells) THEN
-    vec_out = vec_in
-    RETURN
-  END IF
-
-  ALLOCATE(y(ncells,5))
-  y = 0.0_8
-  vec_out = 0.0_8
-
-  DO ii = 1_8, ncells
-    IF (pc_use_rcm_order .AND. ALLOCATED(pc_perm) .AND. SIZE(pc_perm) >= ncells) THEN
-      i = pc_perm(ii)
-    ELSE
-      i = ii
-    END IF
-
-    rhs = vec_in((i-1_8)*5+1:(i-1_8)*5+5)
-    ri = i
-    IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-      ri = pc_iperm(i)
-    END IF
-
-    DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-      j = pc_col_ind(p)
-      rj = j
-      IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-        rj = pc_iperm(j)
-      END IF
-      IF (rj < ri) THEN
-        CALL MATVEC5(pc_blk(p,:,:), y(j,:), tmp)
-        rhs = rhs - tmp
-      END IF
-    END DO
-    y(i,:) = rhs
-  END DO
-
-  DO ii = ncells, 1_8, -1_8
-    IF (pc_use_rcm_order .AND. ALLOCATED(pc_perm) .AND. SIZE(pc_perm) >= ncells) THEN
-      i = pc_perm(ii)
-    ELSE
-      i = ii
-    END IF
-
-    rhs = y(i,:)
-    ri = i
-    IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-      ri = pc_iperm(i)
-    END IF
-
-    DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
-      j = pc_col_ind(p)
-      rj = j
-      IF (pc_use_rcm_order .AND. ALLOCATED(pc_iperm) .AND. SIZE(pc_iperm) >= ncells) THEN
-        rj = pc_iperm(j)
-      END IF
-      IF (rj > ri) THEN
-        CALL MATVEC5(pc_blk(p,:,:), vec_out((j-1_8)*5+1:(j-1_8)*5+5), tmp)
-        rhs = rhs - tmp
-      END IF
-    END DO
-    CALL MATVEC5(pc_uinv(i,:,:), rhs, vec_out((i-1_8)*5+1:(i-1_8)*5+5))
-  END DO
-
-  DEALLOCATE(y)
-END SUBROUTINE PC_APPLY_ILU_CORE
-SUBROUTINE PC_APPLY_TWO_LEVEL_MULT(ncells, rhs_in, z_io)
-  IMPLICIT NONE
-  INTEGER(kind=8), INTENT(IN) :: ncells
-  REAL(kind=8), INTENT(IN) :: rhs_in(:)
-  REAL(kind=8), INTENT(INOUT) :: z_io(:)
-  INTEGER(kind=8) :: cyc, s
-  REAL(kind=8), ALLOCATABLE :: res(:), dz(:), ec(:), Az(:)
-
-  IF (.NOT. pc_use_two_level) RETURN
-  IF (.NOT. pc_coarse_ready) RETURN
-
-  ALLOCATE(res(ncells*5), dz(ncells*5), ec(ncells*5), Az(ncells*5))
-  DO cyc = 1_8, MAX(1_8, pc_two_level_cycles)
-    CALL PC_APPLY_A0(ncells, z_io, Az)
-    res = rhs_in - Az
-
-    DO s = 1_8, MAX(0_8, pc_two_level_presmooth)
-      CALL PC_APPLY_M_INV(res, dz)
-      z_io = z_io + pc_two_level_omega * dz
-      CALL PC_APPLY_A0(ncells, z_io, Az)
-      res = rhs_in - Az
-    END DO
-
-    ec = 0.0_8
-    CALL PC_COARSE_CORRECT_AGG(ncells, res, ec)
-    z_io = z_io + ec
-    CALL PC_APPLY_A0(ncells, z_io, Az)
-    res = rhs_in - Az
-
-    DO s = 1_8, MAX(0_8, pc_two_level_postsmooth)
-      CALL PC_APPLY_M_INV(res, dz)
-      z_io = z_io + pc_two_level_omega * dz
-      CALL PC_APPLY_A0(ncells, z_io, Az)
-      res = rhs_in - Az
-    END DO
-  END DO
-  DEALLOCATE(res, dz, ec, Az)
-END SUBROUTINE PC_APPLY_TWO_LEVEL_MULT
-SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
-  IMPLICIT NONE
-  REAL(kind=8), INTENT(IN)  :: vec_in(:)
-  REAL(kind=8), INTENT(OUT) :: vec_out(:)
-  ! 右预条件一步：求 z ≈ M^{-1} v。与 ADflow 一致之处：在已组装的近似 Jacobian 稀疏结构上
-  ! 用线性代数求解（此处为块 ILU(0) 前代/回代，见 PC_APPLY_ILU_CORE）；不做输出范数裁剪。
-
-  INTEGER(kind=8) :: ncells, istep
-  LOGICAL :: am1_on, tl_on, strict_apply
-  REAL(kind=8) :: omega_poly, n_in, n_out, amp_lim, scl_amp
-  REAL(kind=8), ALLOCATABLE :: vin(:), vout(:)
-  REAL(kind=8), ALLOCATABLE :: Az(:), rr(:), ecorr(:)
-  REAL(kind=8), ALLOCATABLE :: Az2(:), rr2(:), ecorr2(:)
-  REAL(kind=8), ALLOCATABLE :: rr_poly(:), dz(:), Az_poly(:)
-
-  ncells = SIZE(vec_in) / 5
-  strict_apply = pc_adflow_strict_linear_pc
-  am1_on = pc_use_am1
-  tl_on = pc_use_two_level .AND. pc_coarse_ready
-  IF (pc_ab_force_am1_only .AND. pc_ab_force_twolv_only) THEN
-    tl_on = .FALSE.
-    am1_on = .TRUE.
-  ELSE IF (pc_ab_force_am1_only) THEN
-    tl_on = .FALSE.
-    am1_on = .TRUE.
-  ELSE IF (pc_ab_force_twolv_only) THEN
-    am1_on = .FALSE.
-    tl_on = pc_use_two_level .AND. pc_coarse_ready
-  END IF
-  IF (.NOT. pc_ready) THEN
-    vec_out = vec_in
-    RETURN
-  END IF
-
-  ALLOCATE(vin(SIZE(vec_in)), vout(SIZE(vec_in)))
-  vin = vec_in
-  IF (pc_use_var_scaling .OR. (pc_matrix_from_colored_ad .AND. pc_colored_similarity_scale)) THEN
-    CALL APPLY_PC_SCALING_SIMILARITY(vin)
-  END IF
-
-  IF (strict_apply) THEN
-    ! ADflow-style consistency: keep preconditioner application linear/stationary.
-    ! Only apply core M^{-1} (global ILU or configured ASM blend) and skip nonlinear/recursive enrichments.
-    IF (pc_matrix_from_colored_ad .AND. pc_colored_use_diag_only) THEN
-      CALL PC_APPLY_DIAG_ONLY(ncells, vin, vout)
-    ELSEIF (pc_use_schur_split .AND. pc_sp_ready .AND. ALLOCATED(pc_duu_inv)) THEN
-      CALL PC_APPLY_SCHUR_SPLIT(ncells, vin, vout)
-    ELSE
-      CALL PC_APPLY_M_INV(vin, vout)
-    END IF
-    vec_out = vout
-    IF (pc_use_var_scaling .OR. (pc_matrix_from_colored_ad .AND. pc_colored_similarity_scale)) THEN
-      CALL APPLY_PC_UNSCALING_SIMILARITY(vec_out)
-    END IF
-    DEALLOCATE(vin, vout)
-    RETURN
-  END IF
-
-  IF (pc_matrix_from_colored_ad .AND. pc_colored_use_diag_only) THEN
-    CALL PC_APPLY_DIAG_ONLY(ncells, vin, vout)
-  ELSEIF (pc_use_schur_split .AND. pc_sp_ready .AND. ALLOCATED(pc_duu_inv)) THEN
-    CALL PC_APPLY_SCHUR_SPLIT(ncells, vin, vout)
-  ELSE
-    CALL PC_APPLY_M_INV(vin, vout)
-  END IF
-  ! 着色 AD 组装的 A0 与 matrix-free A 一般不一致；禁 AM1/AM_poly/两水平/pschur 以免 ||z|| 爆炸（对齐 PETSc：先稳态 ILU）
-  IF (.NOT. (pc_matrix_from_colored_ad .AND. pc_colored_light_apply)) THEN
-  ! AM^{-1} polynomial defect-correction (multi-step Richardson on preconditioned residual)
-    IF ((.NOT. pc_use_schur_split) .AND. pc_use_am_poly .AND. pc_a0_ready) THEN
-    ALLOCATE(rr_poly(ncells*5), dz(ncells*5), Az_poly(ncells*5))
-    rr_poly = vin
-    vout = 0.0_8
-    omega_poly = pc_am_poly_omega0
-    DO istep = 1_8, MAX(1_8, pc_am_poly_steps)
-      CALL PC_APPLY_M_INV(rr_poly, dz)
-      vout = vout + omega_poly * dz
-      CALL PC_APPLY_A0(ncells, dz, Az_poly)
-      rr_poly = rr_poly - omega_poly * Az_poly
-      omega_poly = MAX(pc_am_poly_omega_min, omega_poly * pc_am_poly_omega_decay)
-    END DO
-    DEALLOCATE(rr_poly, dz, Az_poly)
-    ELSEIF ((.NOT. pc_use_schur_split) .AND. am1_on .AND. pc_a0_ready) THEN
-    ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
-    CALL PC_APPLY_A0(ncells, vout, Az)
-    rr = vin - Az
-    CALL PC_APPLY_M_INV(rr, ecorr)
-    vout = vout + pc_am1_omega * ecorr
-    DEALLOCATE(Az, rr, ecorr)
-  END IF
-  END IF
-
-  IF (.NOT. (pc_matrix_from_colored_ad .AND. pc_colored_light_apply)) THEN
-    IF (tl_on .AND. (.NOT. pc_use_schur_split)) CALL PC_APPLY_TWO_LEVEL_MULT(ncells, vin, vout)
-  END IF
-
-  IF (.NOT. (pc_matrix_from_colored_ad .AND. pc_colored_light_apply)) THEN
-  IF ((.NOT. pc_use_schur_split) .AND. pc_use_pschur .AND. pc_sp_ready) THEN
-    ALLOCATE(Az(ncells*5), rr(ncells*5), ecorr(ncells*5))
-    CALL PC_APPLY_A0(ncells, vout, Az)
-    rr = vin - Az
-    ecorr = 0.0_8
-    CALL PC_APPLY_PRESSURE_SCHUR_CORR(ncells, rr, ecorr)
-    vout = vout + 0.2_8 * ecorr
-    DEALLOCATE(Az, rr, ecorr)
-  END IF
-  END IF
-
-  ! ADflow NK_innerPreConIts 類：z <- z + omega * ILU(v - A0*z) 重複（用同一 ILU 因子）
-  IF (pc_use_inner_richardson .AND. pc_inner_rich_iters > 1_8 .AND. pc_a0_ready .AND. pc_ready .AND. &
-      & (.NOT. pc_use_schur_split) .AND. (.NOT. (pc_matrix_from_colored_ad .AND. pc_colored_use_diag_only))) THEN
-    ALLOCATE(Az(ncells*5), rr(ncells*5), dz(ncells*5))
-    DO istep = 2_8, pc_inner_rich_iters
-      CALL PC_APPLY_A0(ncells, vout, Az)
-      rr(1:ncells*5) = vin(1:ncells*5) - Az(1:ncells*5)
-      CALL PC_APPLY_M_INV(rr, dz)
-      vout(1:ncells*5) = vout(1:ncells*5) + pc_inner_rich_omega * dz(1:ncells*5)
-    END DO
-    DEALLOCATE(Az, rr, dz)
-  END IF
-
-  vec_out = vout
-  IF (pc_use_amp_guard) THEN
-    n_in = SQRT(SUM(vin*vin))
-    n_out = SQRT(SUM(vec_out*vec_out))
-    amp_lim = pc_amp_guard_ratio * MAX(1.0d-30, n_in)
-    IF (n_out > amp_lim) THEN
-      scl_amp = amp_lim / MAX(1.0d-30, n_out)
-      vec_out = scl_amp * vec_out
-      PRINT *, '[PC-GUARD] cap ||M^{-1}v||: in=', n_in, ' out=', n_out, ' lim=', amp_lim
-    END IF
-  END IF
-  IF (pc_use_var_scaling .OR. (pc_matrix_from_colored_ad .AND. pc_colored_similarity_scale)) THEN
-    CALL APPLY_PC_UNSCALING_SIMILARITY(vec_out)
-  END IF
-  DEALLOCATE(vin, vout)
-
-END SUBROUTINE APPLY_PC_INV
-
-SUBROUTINE APPLY_PC_SCALING_SIMILARITY(vec)
-  IMPLICIT NONE
-  REAL(kind=8), INTENT(INOUT) :: vec(:)
-  INTEGER(kind=8) :: ncells, i, b
-  REAL(kind=8) :: d(5)
-  ncells = SIZE(vec)/5
-  d = (/pc_var_scale_p, pc_var_scale_t, pc_var_scale_u, pc_var_scale_u, pc_var_scale_u/)
-  DO i = 1_8, ncells
-    DO b = 1_8, 5_8
-      vec((i-1_8)*5_8 + b) = vec((i-1_8)*5_8 + b) / MAX(d(b), 1.0d-30)
-    END DO
-  END DO
-END SUBROUTINE APPLY_PC_SCALING_SIMILARITY
-
-SUBROUTINE APPLY_PC_UNSCALING_SIMILARITY(vec)
-  IMPLICIT NONE
-  REAL(kind=8), INTENT(INOUT) :: vec(:)
-  INTEGER(kind=8) :: ncells, i, b
-  REAL(kind=8) :: d(5)
-  ncells = SIZE(vec)/5
-  d = (/pc_var_scale_p, pc_var_scale_t, pc_var_scale_u, pc_var_scale_u, pc_var_scale_u/)
-  DO i = 1_8, ncells
-    DO b = 1_8, 5_8
-      vec((i-1_8)*5_8 + b) = vec((i-1_8)*5_8 + b) * d(b)
-    END DO
-  END DO
-END SUBROUTINE APPLY_PC_UNSCALING_SIMILARITY
-	
-	INTEGER(kind=8) FUNCTION FIND_BLOCK_POS(irow, jcol)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: irow, jcol
-	  INTEGER(kind=8) :: p
-	  FIND_BLOCK_POS = 0_8
-	  DO p = pc_row_ptr(irow), pc_row_ptr(irow+1)-1
-		IF (pc_col_ind(p) == jcol) THEN
-		  FIND_BLOCK_POS = p
-		  RETURN
-		END IF
-	  END DO
-	END FUNCTION FIND_BLOCK_POS
-
-	INTEGER(kind=8) FUNCTION FIND_ASM_BLOCK_POS(dom, li, lj)
-	  IMPLICIT NONE
-	  TYPE(PC_ASM_DOM_T), INTENT(IN) :: dom
-	  INTEGER(kind=8), INTENT(IN) :: li, lj
-	  INTEGER(kind=8) :: p
-	  FIND_ASM_BLOCK_POS = 0_8
-	  IF (li < 1_8 .OR. lj < 1_8) RETURN
-	  IF (.NOT. ALLOCATED(dom%row_ptr)) RETURN
-	  IF (li + 1_8 > INT(SIZE(dom%row_ptr), KIND=8)) RETURN
-	  DO p = dom%row_ptr(li), dom%row_ptr(li + 1_8) - 1_8
-	    IF (dom%col_ind(p) == lj) THEN
-	      FIND_ASM_BLOCK_POS = p
-	      RETURN
-	    END IF
-	  END DO
-	END FUNCTION FIND_ASM_BLOCK_POS
-
+	  DEALLOCATE(y)
+	END SUBROUTINE APPLY_PC_INV
 	SUBROUTINE MATMUL5(A, B, C)
 	  IMPLICIT NONE
 	  REAL(kind=8), INTENT(IN) :: A(5,5), B(5,5)
@@ -12807,64 +9675,6 @@ END SUBROUTINE APPLY_PC_UNSCALING_SIMILARITY
 		END DO
 	  END DO
 	END SUBROUTINE MATVEC5
-SUBROUTINE FACE_FLUX_FROM_PRIM_5(wp, fluid, nx, ny, nz, fvec)
-  IMPLICIT NONE
-  REAL(kind=8), INTENT(IN) :: wp(5)
-  TYPE(FLUIDD), INTENT(IN) :: fluid
-  REAL(kind=8), INTENT(IN) :: nx, ny, nz
-  REAL(kind=8), INTENT(OUT) :: fvec(5)
-
-  REAL(kind=8) :: p, t, ux, uy, uz
-  REAL(kind=8) :: rho, cv, q2, e, h, un
-  REAL(kind=8), PARAMETER :: tiny = 1.0d-30
-
-  p  = wp(1)
-  t  = MAX(wp(2), tiny)
-  ux = wp(3)
-  uy = wp(4)
-  uz = wp(5)
-
-  cv = fluid%cp - fluid%r
-  rho = p / MAX(fluid%r*t, tiny)
-  q2 = ux*ux + uy*uy + uz*uz
-  e = cv*t + 0.5_8*q2
-  h = e + p / MAX(rho, tiny)
-  un = ux*nx + uy*ny + uz*nz
-
-  fvec(1) = rho * un
-  fvec(2) = rho * ux * un + nx * p
-  fvec(3) = rho * uy * un + ny * p
-  fvec(4) = rho * uz * un + nz * p
-  fvec(5) = rho * h * un
-END SUBROUTINE FACE_FLUX_FROM_PRIM_5
-SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5(wp, fluid, nx, ny, nz, J)
-  IMPLICIT NONE
-  REAL(kind=8), INTENT(IN) :: wp(5)
-  TYPE(FLUIDD), INTENT(IN) :: fluid
-  REAL(kind=8), INTENT(IN) :: nx, ny, nz
-  REAL(kind=8), INTENT(OUT) :: J(5,5)
-
-  REAL(kind=8) :: w_pert(5), f0(5), f1(5), dw, tinyv
-  INTEGER(kind=8) :: k
-
-  tinyv = 1.0d-12
-  CALL FACE_FLUX_FROM_PRIM_5(wp, fluid, nx, ny, nz, f0)
-  J = 0.0_8
-
-  DO k = 1_8, 5_8
-    w_pert = wp
-    dw = 1.0d-6 * MAX(ABS(wp(k)), 1.0_8)
-    IF (k == 2_8) THEN
-      w_pert(k) = MAX(wp(k) + dw, 1.0d-8)
-      dw = w_pert(k) - wp(k)
-    ELSE
-      w_pert(k) = wp(k) + dw
-    END IF
-    IF (ABS(dw) < tinyv) dw = SIGN(tinyv, dw + tinyv)
-    CALL FACE_FLUX_FROM_PRIM_5(w_pert, fluid, nx, ny, nz, f1)
-    J(1:5,k) = (f1(1:5) - f0(1:5)) / dw
-  END DO
-END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 	SUBROUTINE BUILD_DUDW_5X5(wp, fluid, J)
 	  IMPLICIT NONE
 	  REAL(kind=8), INTENT(IN)  :: wp(5)     ! [P,T,Ux,Uy,Uz]
@@ -12913,138 +9723,119 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 	  J(5,4) = rho*Uy
 	  J(5,5) = rho*Uz
 	END SUBROUTINE BUILD_DUDW_5X5
+	SUBROUTINE BUILD_EULER_AUN_FROM_PRIM_5X5(wp, fluid, nxu, nyu, nzu, A)
+	  IMPLICIT NONE
+	  REAL(kind=8), INTENT(IN)  :: wp(5)
+	  TYPE(FLUIDD), INTENT(IN)  :: fluid
+	  REAL(kind=8), INTENT(IN)  :: nxu, nyu, nzu
+	  REAL(kind=8), INTENT(OUT) :: A(5,5)
 
-    SUBROUTINE BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
-      IMPLICIT NONE
-      REAL(kind=8), INTENT(IN) :: wp(5)
-      TYPE(FLUIDD), INTENT(IN) :: fluid
-      REAL(kind=8), INTENT(OUT) :: Jinv(5,5)
-      REAL(kind=8) :: J(5,5)
-      LOGICAL :: ok
+	  REAL(kind=8) :: P, T, u, v, w, rho, Cv, q2, Eint, H, un, phi
+	  REAL(kind=8) :: gamma, gm1
+	  REAL(kind=8), PARAMETER :: tiny = 1.0d-30
 
-      CALL BUILD_DUDW_5X5(wp, fluid, J)
-      CALL INVERT_DENSE(J, Jinv, ok)
-      IF (.NOT. ok) THEN
-        Jinv = 0.0_8
-        Jinv(1,1)=1.0_8; Jinv(2,2)=1.0_8; Jinv(3,3)=1.0_8; Jinv(4,4)=1.0_8; Jinv(5,5)=1.0_8
-      END IF
-    END SUBROUTINE BUILD_DUDW_INV_5X5
+	  gamma = fluid%gammaa
+	  gm1   = gamma - 1.0_8
 
-  SUBROUTINE APPLY_TANGENT_OPERATOR_WORK(data_4d137, cellprimitives, n, vec_work, sigma_shift, vec_out, vec_tmp_dw)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: data_4d137(1, 4)
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    INTEGER(kind=8), INTENT(IN) :: n
-    REAL(kind=8), INTENT(IN) :: vec_work(:)
-    REAL(kind=8), INTENT(IN) :: sigma_shift
-    REAL(kind=8), INTENT(OUT) :: vec_out(:)
-    REAL(kind=8), INTENT(INOUT) :: vec_tmp_dw(:)
+	  P  = wp(1)
+	  T  = MAX(wp(2), tiny)
+	  u  = wp(3)
+	  v  = wp(4)
+	  w  = wp(5)
 
-    IF (use_conservative_unknown_operator) THEN
-      CALL APPLY_DU_TO_DW(cellprimitives, vec_work, vec_tmp_dw)
-      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_tmp_dw, vec_out)
-    ELSE
-      CALL TANGENT_MATVEC(data_4d137, cellprimitives, n, vec_work, vec_out)
-    END IF
-    IF (sigma_shift > 0.0_8) vec_out(1:n) = vec_out(1:n) + sigma_shift * vec_work(1:n)
-  END SUBROUTINE APPLY_TANGENT_OPERATOR_WORK
+	  Cv   = fluid%cp - fluid%r
+	  rho  = P / MAX(fluid%r * T, tiny)
+	  q2   = u*u + v*v + w*w
+	  Eint = Cv*T + 0.5_8*q2
+	  H    = Eint + P / MAX(rho, tiny)
+	  un   = u*nxu + v*nyu + w*nzu
+	  phi  = 0.5_8 * gm1 * q2
 
-  SUBROUTINE APPLY_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r_in, r_out)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    REAL(kind=8), INTENT(IN) :: r_in(:)
-    REAL(kind=8), INTENT(OUT) :: r_out(:)
-    INTEGER(kind=8) :: ncells, c
-    REAL(kind=8) :: wp(5), Jinv(5, 5), rv(5), rw(5)
-    TYPE(FLUIDD) :: fluid
+	  A(1,1) = 0.0_8
+	  A(1,2) = nxu
+	  A(1,3) = nyu
+	  A(1,4) = nzu
+	  A(1,5) = 0.0_8
 
-    fluid%cp = 1005.0d0
-    fluid%r = 287.05d0
-    fluid%gammaa = 1.4d0
+	  A(2,1) = nxu*phi - u*un
+	  A(2,2) = un - gm1*u*nxu
+	  A(2,3) = u*nyu - gm1*v*nxu
+	  A(2,4) = u*nzu - gm1*w*nxu
+	  A(2,5) = gm1*nxu
 
-    ncells = SIZE(r_in)/5_8
-    r_out = r_in
-    IF (SIZE(cellprimitives, 1) < ncells .OR. SIZE(cellprimitives, 2) < 5) RETURN
+	  A(3,1) = nyu*phi - v*un
+	  A(3,2) = v*nxu - gm1*u*nyu
+	  A(3,3) = un - gm1*v*nyu
+	  A(3,4) = v*nzu - gm1*w*nyu
+	  A(3,5) = gm1*nyu
 
-    DO c = 1_8, ncells
-      wp(1:5) = cellprimitives(c, 1:5)
-      CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
-      rv(1:5) = r_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
-      rw = MATMUL(Jinv, rv)
-      r_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = rw
-    END DO
-  END SUBROUTINE APPLY_PRIMITIVE_LEFT_TRANSFORM
+	  A(4,1) = nzu*phi - w*un
+	  A(4,2) = w*nxu - gm1*u*nzu
+	  A(4,3) = w*nyu - gm1*v*nzu
+	  A(4,4) = un - gm1*w*nzu
+	  A(4,5) = gm1*nzu
 
-  SUBROUTINE APPLY_INV_PRIMITIVE_LEFT_TRANSFORM(cellprimitives, r_in, r_out)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    REAL(kind=8), INTENT(IN) :: r_in(:)
-    REAL(kind=8), INTENT(OUT) :: r_out(:)
-    INTEGER(kind=8) :: ncells, c
-    REAL(kind=8) :: wp(5), J(5, 5), rv(5), rw(5)
-    TYPE(FLUIDD) :: fluid
+	  A(5,1) = un*(phi - H)
+	  A(5,2) = nxu*H - gm1*u*un
+	  A(5,3) = nyu*H - gm1*v*un
+	  A(5,4) = nzu*H - gm1*w*un
+	  A(5,5) = gamma*un
+	END SUBROUTINE BUILD_EULER_AUN_FROM_PRIM_5X5
+	SUBROUTINE BUILD_CELL_COLORING_L2(ncells, nlist, row_cnt, color, ncolor)
+	  IMPLICIT NONE
+	  INTEGER(kind=8), INTENT(IN) :: ncells
+	  INTEGER(kind=8), INTENT(IN) :: nlist(:, :)
+	  INTEGER(kind=8), INTENT(IN) :: row_cnt(:)
+	  INTEGER(kind=8), INTENT(OUT) :: color(:)
+	  INTEGER(kind=8), INTENT(OUT) :: ncolor
 
-    fluid%cp = 1005.0d0
-    fluid%r = 287.05d0
-    fluid%gammaa = 1.4d0
+	  INTEGER(kind=8) :: c, i, j, n1, n2, k
+	  LOGICAL, ALLOCATABLE :: used(:)
+	  INTEGER(kind=8), PARAMETER :: max_try = 2048_8
 
-    ncells = SIZE(r_in)/5_8
-    r_out = r_in
-    IF (SIZE(cellprimitives, 1) < ncells .OR. SIZE(cellprimitives, 2) < 5) RETURN
+	  ALLOCATE(used(max_try))
+	  color = 0_8
+	  ncolor = 0_8
 
-    DO c = 1_8, ncells
-      wp(1:5) = cellprimitives(c, 1:5)
-      CALL BUILD_DUDW_5X5(wp, fluid, J)
-      rv(1:5) = r_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
-      rw = MATMUL(J, rv)
-      r_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = rw
-    END DO
-  END SUBROUTINE APPLY_INV_PRIMITIVE_LEFT_TRANSFORM
+	  DO c = 1_8, ncells
+		used = .FALSE.
 
-  SUBROUTINE APPLY_DW_TO_DU(cellprimitives, xw_in, xu_out)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    REAL(kind=8), INTENT(IN) :: xw_in(:)
-    REAL(kind=8), INTENT(OUT) :: xu_out(:)
-    INTEGER(kind=8) :: c, ncells
-    REAL(kind=8) :: wp(5), J(5,5), xw(5), xu(5)
-    TYPE(FLUIDD) :: fluid
-    ncells = SIZE(cellprimitives, 1)
-    xu_out = 0.0_8
-    fluid%cp = 1005.0d0
-    fluid%r = 287.05d0
-    fluid%gammaa = 1.4d0
-    DO c = 1_8, ncells
-      wp(1:5) = cellprimitives(c, 1:5)
-      CALL BUILD_DUDW_5X5(wp, fluid, J)
-      xw(1:5) = xw_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
-      xu = MATMUL(J, xw)
-      xu_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xu
-    END DO
-  END SUBROUTINE APPLY_DW_TO_DU
+		! 距離 1 衝突（含自身）
+		DO i = 1_8, row_cnt(c)
+		  n1 = nlist(c, i)
+		  IF (n1 >= 1_8 .AND. n1 <= ncells) THEN
+		    IF (color(n1) > 0_8 .AND. color(n1) <= max_try) used(color(n1)) = .TRUE.
+		  END IF
+		END DO
 
-  SUBROUTINE APPLY_DU_TO_DW(cellprimitives, xu_in, xw_out)
-    IMPLICIT NONE
-    REAL(kind=8), INTENT(IN) :: cellprimitives(:, :)
-    REAL(kind=8), INTENT(IN) :: xu_in(:)
-    REAL(kind=8), INTENT(OUT) :: xw_out(:)
-    INTEGER(kind=8) :: c, ncells
-    REAL(kind=8) :: wp(5), Jinv(5,5), xu(5), xw(5)
-    TYPE(FLUIDD) :: fluid
-    ncells = SIZE(cellprimitives, 1)
-    xw_out = 0.0_8
-    fluid%cp = 1005.0d0
-    fluid%r = 287.05d0
-    fluid%gammaa = 1.4d0
-    DO c = 1_8, ncells
-      wp(1:5) = cellprimitives(c, 1:5)
-      CALL BUILD_DUDW_INV_5X5(wp, fluid, Jinv)
-      xu(1:5) = xu_in((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8)
-      xw = MATMUL(Jinv, xu)
-      xw_out((c-1_8)*5_8+1_8:(c-1_8)*5_8+5_8) = xw
-    END DO
-  END SUBROUTINE APPLY_DU_TO_DW
+		! 距離 2 衝突
+		DO i = 1_8, row_cnt(c)
+		  n1 = nlist(c, i)
+		  IF (n1 < 1_8 .OR. n1 > ncells) CYCLE
+		  DO j = 1_8, row_cnt(n1)
+		    n2 = nlist(n1, j)
+		    IF (n2 < 1_8 .OR. n2 > ncells) CYCLE
+		    IF (color(n2) > 0_8 .AND. color(n2) <= max_try) used(color(n2)) = .TRUE.
+		  END DO
+		END DO
 
+		k = 1_8
+		DO WHILE (k <= max_try)
+		  IF (.NOT. used(k)) EXIT
+		  k = k + 1_8
+		END DO
+
+		IF (k > max_try) THEN
+		  PRINT *, '[PC-AD] coloring overflow, increase max_try.'
+		  k = max_try
+		END IF
+
+		color(c) = k
+		IF (k > ncolor) ncolor = k
+	  END DO
+
+	  DEALLOCATE(used)
+	END SUBROUTINE BUILD_CELL_COLORING_L2
 	SUBROUTINE SORT_UNIQUE_I8(arr, nout)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(INOUT) :: arr(:)
@@ -13066,128 +9857,119 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 		  arr(nout) = arr(i)
 		END IF
 	  END DO
-	END SUBROUTINE SORT_UNIQUE_I8
-	SUBROUTINE PC_BUILD_RCM_ORDER(ncells, nlist, row_cnt)
+		END SUBROUTINE SORT_UNIQUE_I8
+		SUBROUTINE PC_SORT_ROWS_AND_SYNC(ncells)
+		  IMPLICIT NONE
+		  INTEGER(kind=8), INTENT(IN) :: ncells
+		  INTEGER(kind=8) :: i, p0, p1, a, b, min_idx, tmp_col
+		  REAL(kind=8) :: tmp_blk(5,5)
+
+		  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+		  IF (.NOT. ALLOCATED(pc_diag_pos)) RETURN
+
+		  DO i = 1_8, ncells
+			p0 = pc_row_ptr(i)
+			p1 = pc_row_ptr(i+1_8) - 1_8
+			IF (p1 <= p0) CYCLE
+			DO a = p0, p1-1_8
+			  min_idx = a
+			  DO b = a+1_8, p1
+				IF (pc_col_ind(b) < pc_col_ind(min_idx)) min_idx = b
+			  END DO
+			  IF (min_idx /= a) THEN
+				tmp_col = pc_col_ind(a)
+				pc_col_ind(a) = pc_col_ind(min_idx)
+				pc_col_ind(min_idx) = tmp_col
+				tmp_blk = pc_blk(a,:,:)
+				pc_blk(a,:,:) = pc_blk(min_idx,:,:)
+				pc_blk(min_idx,:,:) = tmp_blk
+			  END IF
+			END DO
+		  END DO
+
+		  DO i = 1_8, ncells
+			pc_diag_pos(i) = FIND_BLOCK_POS(i, i)
+		  END DO
+		END SUBROUTINE PC_SORT_ROWS_AND_SYNC
+		SUBROUTINE BLOCK_INF_NORM5(A, nrm)
+	  IMPLICIT NONE
+	  REAL(kind=8), INTENT(IN) :: A(5,5)
+	  REAL(kind=8), INTENT(OUT) :: nrm
+	  INTEGER(kind=8) :: i, j
+	  REAL(kind=8) :: rowsum
+
+	  nrm = 0.0_8
+	  DO i = 1_8, 5_8
+		rowsum = 0.0_8
+		DO j = 1_8, 5_8
+		  rowsum = rowsum + ABS(A(i,j))
+		END DO
+		nrm = MAX(nrm, rowsum)
+	  END DO
+	END SUBROUTINE BLOCK_INF_NORM5
+	SUBROUTINE APPLY_PC_BLOCK_EQUIL(ncells)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
-	  INTEGER(kind=8), INTENT(IN) :: nlist(:, :)
-	  INTEGER(kind=8), INTENT(IN) :: row_cnt(:)
 
-	  INTEGER(kind=8), ALLOCATABLE :: q(:), cm(:), neigh(:), deg(:)
-	  LOGICAL, ALLOCATABLE :: vis(:)
-	  INTEGER(kind=8) :: i, j, k, v, nb, head, tail, ncm
-	  INTEGER(kind=8) :: start, best_deg, m, t, tmp
-	  INTEGER(kind=8) :: bw_before, bw_after
+	  INTEGER(kind=8) :: i, j, p, it
+	  REAL(kind=8), ALLOCATABLE :: rown(:), coln(:)
+	  REAL(kind=8) :: bnrm, tinyv, scaleL, scaleR
 
-	  IF (ALLOCATED(pc_perm)) DEALLOCATE(pc_perm)
-	  IF (ALLOCATED(pc_iperm)) DEALLOCATE(pc_iperm)
-	  ALLOCATE(pc_perm(ncells), pc_iperm(ncells))
+	  tinyv = 1.0d-30
 
-	  IF (.NOT. pc_use_rcm_order) THEN
+	  IF (.NOT. ALLOCATED(pc_row_ptr) .OR. .NOT. ALLOCATED(pc_col_ind) .OR. .NOT. ALLOCATED(pc_blk)) RETURN
+	  IF (SIZE(pc_row_ptr) < ncells+1_8) RETURN
+
+	  IF (ALLOCATED(pc_eqL)) DEALLOCATE(pc_eqL)
+	  IF (ALLOCATED(pc_eqR)) DEALLOCATE(pc_eqR)
+	  ALLOCATE(pc_eqL(ncells), pc_eqR(ncells))
+	  pc_eqL = 1.0_8
+	  pc_eqR = 1.0_8
+
+	  ALLOCATE(rown(ncells), coln(ncells))
+
+	  DO it = 1_8, pc_equil_iters
+		rown = 0.0_8
+		coln = 0.0_8
+
+		! 统计当前矩阵的行/列块范数和
 		DO i = 1_8, ncells
-		  pc_perm(i)  = i
-		  pc_iperm(i) = i
+		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+		    j = pc_col_ind(p)
+		    CALL BLOCK_INF_NORM5(pc_blk(p,:,:), bnrm)
+		    rown(i) = rown(i) + bnrm
+		    IF (j >= 1_8 .AND. j <= ncells) coln(j) = coln(j) + bnrm
+		  END DO
 		END DO
-		PRINT *, '[PC-RCM] disabled.'
-		RETURN
-	  END IF
 
-	  ALLOCATE(q(ncells), cm(ncells), vis(ncells), deg(ncells))
-	  ALLOCATE(neigh(MAX(1_8, MAXVAL(row_cnt)-1_8)))
-
-	  vis = .FALSE.
-	  q   = 0_8
-	  cm  = 0_8
-
-	  DO i = 1_8, ncells
-		deg(i) = MAX(0_8, row_cnt(i)-1_8)   ! 去掉 self 后的度
-	  END DO
-
-	  ncm = 0_8
-	  DO WHILE (ncm < ncells)
-
-		start = 0_8
-		best_deg = HUGE(1_8)
+		! 行缩放：A_ij <- s_i * A_ij
 		DO i = 1_8, ncells
-		  IF (.NOT. vis(i)) THEN
-		    IF (deg(i) < best_deg) THEN
-		      best_deg = deg(i)
-		      start = i
-		    END IF
-		  END IF
+		  scaleL = 1.0_8 / SQRT(MAX(rown(i), tinyv))
+		  pc_eqL(i) = pc_eqL(i) * scaleL
+		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+		    pc_blk(p,:,:) = scaleL * pc_blk(p,:,:)
+		  END DO
 		END DO
-		IF (start <= 0_8) EXIT
 
-		head = 1_8
-		tail = 1_8
-		q(1) = start
-		vis(start) = .TRUE.
-
-		DO WHILE (head <= tail)
-		  v = q(head)
-		  head = head + 1_8
-
-		  ncm = ncm + 1_8
-		  cm(ncm) = v
-
-		  m = 0_8
-		  DO t = 1_8, row_cnt(v)
-		    nb = nlist(v, t)
-		    IF (nb <= 0_8 .OR. nb == v) CYCLE
-		    IF (.NOT. vis(nb)) THEN
-		      m = m + 1_8
-		      neigh(m) = nb
-		    END IF
+		! 列缩放：A_ij <- A_ij * t_j
+		DO i = 1_8, ncells
+		  DO p = pc_row_ptr(i), pc_row_ptr(i+1_8)-1_8
+		    j = pc_col_ind(p)
+		    IF (j < 1_8 .OR. j > ncells) CYCLE
+		    scaleR = 1.0_8 / SQRT(MAX(coln(j), tinyv))
+		    pc_blk(p,:,:) = pc_blk(p,:,:) * scaleR
 		  END DO
+		END DO
 
-		  ! 按度升序（简易排序）
-		  DO i = 1_8, m-1_8
-		    DO j = i+1_8, m
-		      IF (deg(neigh(j)) < deg(neigh(i))) THEN
-		        tmp = neigh(i)
-		        neigh(i) = neigh(j)
-		        neigh(j) = tmp
-		      END IF
-		    END DO
-		  END DO
-
-		  DO i = 1_8, m
-		    nb = neigh(i)
-		    IF (.NOT. vis(nb)) THEN
-		      tail = tail + 1_8
-		      q(tail) = nb
-		      vis(nb) = .TRUE.
-		    END IF
-		  END DO
+		! 累积记录右缩放（近似记录，便于后续需要时反缩放）
+		DO j = 1_8, ncells
+		  scaleR = 1.0_8 / SQRT(MAX(coln(j), tinyv))
+		  pc_eqR(j) = pc_eqR(j) * scaleR
 		END DO
 	  END DO
 
-	  ! Reverse CM -> RCM
-	  DO k = 1_8, ncells
-		pc_perm(k) = cm(ncells-k+1_8)
-	  END DO
-
-	  DO k = 1_8, ncells
-		pc_iperm(pc_perm(k)) = k
-	  END DO
-
-	  ! 带宽统计
-	  bw_before = 0_8
-	  bw_after  = 0_8
-	  DO i = 1_8, ncells
-		DO t = 1_8, row_cnt(i)
-		  nb = nlist(i, t)
-		  IF (nb <= 0_8) CYCLE
-		  bw_before = MAX(bw_before, ABS(i-nb))
-		  bw_after  = MAX(bw_after,  ABS(pc_iperm(i)-pc_iperm(nb)))
-		END DO
-	  END DO
-
-	  PRINT *, '[PC-RCM] enabled=', pc_use_rcm_order, ' bw_before=', bw_before, ' bw_after=', bw_after
-
-	  DEALLOCATE(q, cm, vis, deg, neigh)
-	END SUBROUTINE PC_BUILD_RCM_ORDER
-
+	  DEALLOCATE(rown, coln)
+	END SUBROUTINE APPLY_PC_BLOCK_EQUIL
 	SUBROUTINE FACTOR_BLOCK_ILU0(ncells, ok)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
@@ -13198,13 +9980,8 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 	  REAL(kind=8) :: T(5,5), S(5,5)
 	  LOGICAL :: inv_ok
 	  REAL(kind=8) :: nd, ni, cmin, cmax, csum, cnow
-	  REAL(kind=8) :: worst_cond
-	  INTEGER(kind=8) :: worst_i, worst_p
 
 	  ok = .TRUE.
-	  worst_cond = -1.0_8
-	  worst_i = -1_8
-	  worst_p = -1_8
 
 	  DO ii = 1_8, ncells
 		IF (pc_use_rcm_order .AND. ALLOCATED(pc_perm) .AND. SIZE(pc_perm) >= ncells) THEN
@@ -13329,152 +10106,11 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 		cmin = MIN(cmin, cnow)
 		cmax = MAX(cmax, cnow)
 		csum = csum + cnow
-		IF (cnow > worst_cond) THEN
-		  worst_cond = cnow
-		  worst_i = i
-		  worst_p = p_ij
-		END IF
 	  END DO
 	  PRINT *, '[PC-ILU] diag_cond_est min/max/avg=', cmin, cmax, csum / MAX(1_8, ncells)
-	  IF (pc_dump_worst_ilu_block .AND. worst_p > 0_8) THEN
-		PRINT *, '[PC-ILU] worst_diag_block cell=', worst_i, ' cond_est=', worst_cond
-		IF (worst_cond >= pc_dump_ilu_cond_thr) THEN
-		  PRINT *, '[PC-ILU] worst_diag_block exceeds threshold=', pc_dump_ilu_cond_thr
-		END IF
-		CALL PCDBG_PRINT_MAT5('Uii(worst)', pc_blk(worst_p,:,:))
-		CALL PCDBG_PRINT_MAT5('inv(Uii)(worst)', pc_uinv(worst_i,:,:))
-	  END IF
 
 	END SUBROUTINE FACTOR_BLOCK_ILU0
-	SUBROUTINE PC_TARGETED_DIAG_BOOST(ncells)
-	  IMPLICIT NONE
-	  INTEGER(kind=8), INTENT(IN) :: ncells
-
-	  INTEGER(kind=8) :: i, p, pp, j, k
-	  REAL(kind=8) :: offsum, nblk, ndiag, ninv, cond_est
-	  REAL(kind=8) :: alpha_i, shiftv, ratio
-	  REAL(kind=8) :: D(5,5), Dinv(5,5)
-	  LOGICAL :: okinv
-	  INTEGER(kind=8) :: nboost
-	  REAL(kind=8) :: cond_thr, tinyv, alpha_cap, alpha_base
-	  REAL(kind=8) :: max_shift_ratio, coupling_ratio
-
-	  ! 可按需要调
-	  cond_thr   = 3.0e7     ! 超过该条件数估计才增强
-	  alpha_cap  = 5.0d-3    ! 每块增强上限
-	  alpha_base = 1.0d-3    ! 增强基数
-	  tinyv      = 1.0d-30
-	  max_shift_ratio = 5.0d-3   ! shiftv 上限: 2% * ||Dii||_inf
-
-	  nboost = 0_8
-
-	  DO i = 1_8, ncells
-		p = pc_diag_pos(i)
-		IF (p <= 0_8) CYCLE
-
-		D = pc_blk(p,:,:)
-		CALL INVERT_5X5(D, Dinv, okinv)
-		IF (.NOT. okinv) CYCLE
-
-		CALL BLOCK_INF_NORM5(D, ndiag)
-		CALL BLOCK_INF_NORM5(Dinv, ninv)
-		cond_est = ndiag * ninv
-
-		IF (cond_est <= cond_thr) CYCLE
-
-		offsum = 0.0_8
-		DO pp = pc_row_ptr(i), pc_row_ptr(i+1)-1
-		  j = pc_col_ind(pp)
-		  IF (j == i) CYCLE
-		  CALL BLOCK_INF_NORM5(pc_blk(pp,:,:), nblk)
-		  offsum = offsum + nblk
-		END DO		
-		IF (offsum <= tinyv) CYCLE
-		
-		coupling_ratio = offsum / MAX(ndiag, tinyv)
-		IF (coupling_ratio <= 5.0d-1) CYCLE
-
-		ratio = cond_est / cond_thr
-		alpha_i = alpha_base * LOG10(1.0_8 + ratio)
-		alpha_i = MIN(alpha_i, alpha_cap)
-
-		shiftv = alpha_i * offsum
-		shiftv = MIN(shiftv, max_shift_ratio * MAX(ndiag, tinyv))
-		IF (shiftv > 0.0_8) THEN
-		  DO k = 1_8, 5_8
-		    pc_blk(p,k,k) = pc_blk(p,k,k) + shiftv
-		  END DO
-		  nboost = nboost + 1_8
-		  IF (REAL(nboost,8) > 0.02d0 * REAL(ncells,8)) EXIT
-		END IF
-	  END DO
-
-	  PRINT *, '[PC-BOOST] cond_thr=', cond_thr, ' boosted_blocks=', nboost, ' / ', ncells
-	END SUBROUTINE PC_TARGETED_DIAG_BOOST
-	SUBROUTINE INVERT_DENSE(a, ai, ok)
-	  IMPLICIT NONE
-	  REAL(kind=8), INTENT(IN) :: a(:,:)
-	  REAL(kind=8), INTENT(OUT) :: ai(:,:)
-	  LOGICAL, INTENT(OUT) :: ok
-
-	  INTEGER(kind=8) :: n, i, j, k, p
-	  REAL(kind=8), ALLOCATABLE :: m(:,:)
-	  REAL(kind=8) :: t, piv, tinyv
-
-	  tinyv = 1.0d-30
-	  n = SIZE(a,1)
-	  IF (SIZE(a,2) /= n .OR. SIZE(ai,1) /= n .OR. SIZE(ai,2) /= n) THEN
-		ok = .FALSE.
-		RETURN
-	  END IF
-
-	  ALLOCATE(m(n,n))
-	  m = a
-	  ai = 0.0_8
-	  DO i = 1_8, n
-		ai(i,i) = 1.0_8
-	  END DO
-
-	  ok = .TRUE.
-	  DO k = 1_8, n
-		p = k
-		DO i = k+1_8, n
-		  IF (ABS(m(i,k)) > ABS(m(p,k))) p = i
-		END DO
-
-		piv = ABS(m(p,k))
-		IF (piv < tinyv) THEN
-		  ok = .FALSE.
-		  DEALLOCATE(m)
-		  RETURN
-		END IF
-
-		IF (p /= k) THEN
-		  DO j = 1_8, n
-		    t = m(k,j); m(k,j) = m(p,j); m(p,j) = t
-		    t = ai(k,j); ai(k,j) = ai(p,j); ai(p,j) = t
-		  END DO
-		END IF
-
-		t = m(k,k)
-		DO j = 1_8, n
-		  m(k,j) = m(k,j) / t
-		  ai(k,j) = ai(k,j) / t
-		END DO
-
-		DO i = 1_8, n
-		  IF (i == k) CYCLE
-		  t = m(i,k)
-		  IF (ABS(t) < tinyv) CYCLE
-		  DO j = 1_8, n
-		    m(i,j) = m(i,j) - t*m(k,j)
-		    ai(i,j) = ai(i,j) - t*ai(k,j)
-		  END DO
-		END DO
-	  END DO
-
-	  DEALLOCATE(m)
-	END SUBROUTINE INVERT_DENSE
+	
   SUBROUTINE INVERT_5X5(a, ai, ok)
     IMPLICIT NONE
     REAL(kind=8), INTENT(IN) :: a(5, 5)
@@ -13605,4 +10241,101 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 
     DEALLOCATE(r0, r1, drd, dwdx_zero, w0, w1)
   END SUBROUTINE RESIDUAL_FD_DEFORM_PARAM_VTK
+  SUBROUTINE PCDBG_SET_CONTEXT(enable, mvar, color, rowmask)
+	  IMPLICIT NONE
+	  LOGICAL, INTENT(IN) :: enable
+	  INTEGER(kind=8), INTENT(IN) :: mvar, color
+	  LOGICAL, INTENT(IN) :: rowmask(:)
+
+	  pc_dbg_enable = enable
+	  pc_dbg_mvar = mvar
+	  pc_dbg_color = color
+
+	  IF (ALLOCATED(pc_dbg_rowmask)) DEALLOCATE(pc_dbg_rowmask)
+	  ALLOCATE(pc_dbg_rowmask(SIZE(rowmask)))
+	  pc_dbg_rowmask = rowmask
+  END SUBROUTINE PCDBG_SET_CONTEXT
+
+	SUBROUTINE PCDBG_CLEAR_CONTEXT()
+	  IMPLICIT NONE
+	  pc_dbg_enable = .FALSE.
+	  pc_dbg_mvar = -1_8
+	  pc_dbg_color = -1_8
+	  IF (ALLOCATED(pc_dbg_rowmask)) DEALLOCATE(pc_dbg_rowmask)
+	END SUBROUTINE PCDBG_CLEAR_CONTEXT
+	SUBROUTINE PCDBG_CHECK_FACE_SPILL(tag)
+	  IMPLICIT NONE
+	  CHARACTER(len=*), INTENT(IN) :: tag
+	  INTEGER(kind=8) :: f, owner, neigh, nfaces
+	  REAL(kind=8) :: v, l1_spill, l1_inband
+	  INTEGER(kind=8) :: nspill
+	  LOGICAL :: inband
+
+	  IF (.NOT. pc_dbg_enable) RETURN
+	  IF (pc_dbg_mvar /= 1_8) RETURN
+	  IF (.NOT. ALLOCATED(pc_dbg_rowmask)) RETURN
+	  IF (.NOT. ALLOCATED(facefluxes_slnd)) RETURN
+	  IF (.NOT. ALLOCATED(faces_mesh)) RETURN
+
+	  nfaces = SIZE(faces_mesh,1)
+	  l1_spill = 0.0_8
+	  l1_inband = 0.0_8
+	  nspill = 0_8
+
+	  DO f = 1_8, nfaces
+		owner = faces_mesh(f,1)
+		neigh = faces_mesh(f,2)
+		inband = .FALSE.
+		IF (owner>=1_8 .AND. owner<=SIZE(pc_dbg_rowmask)) inband = inband .OR. pc_dbg_rowmask(owner)
+		IF (neigh>=1_8 .AND. neigh<=SIZE(pc_dbg_rowmask)) inband = inband .OR. pc_dbg_rowmask(neigh)
+
+		! 这里只看 mvar=1 对应的 facefluxes 分量组(1:3)
+		v = ABS(facefluxes_slnd(f,1)) + ABS(facefluxes_slnd(f,2)) + ABS(facefluxes_slnd(f,3))
+
+		IF (inband) THEN
+		  l1_inband = l1_inband + v
+		ELSE
+		  l1_spill = l1_spill + v
+		  IF (v > 1.0d-10) nspill = nspill + 1_8
+		END IF
+	  END DO
+
+	  PRINT *, '[PC-DBG][', TRIM(tag), '][FACE] color=', pc_dbg_color, &
+		       ' mvar=', pc_dbg_mvar, ' inband_l1=', l1_inband, &
+		       ' spill_l1=', l1_spill, ' spill_face_n=', nspill
+	END SUBROUTINE PCDBG_CHECK_FACE_SPILL
+
+
+	SUBROUTINE PCDBG_CHECK_RES_SPILL(tag)
+	  IMPLICIT NONE
+	  CHARACTER(len=*), INTENT(IN) :: tag
+	  INTEGER(kind=8) :: c, rvar
+	  REAL(kind=8) :: v, l1_spill, l1_inband
+	  INTEGER(kind=8) :: nspill
+
+	  IF (.NOT. pc_dbg_enable) RETURN
+	  IF (pc_dbg_mvar /= 1_8) RETURN
+	  IF (.NOT. ALLOCATED(pc_dbg_rowmask)) RETURN
+	  IF (.NOT. ALLOCATED(fluxresiduals_slnd)) RETURN
+
+	  l1_spill = 0.0_8
+	  l1_inband = 0.0_8
+	  nspill = 0_8
+
+	  DO c = 1_8, SIZE(pc_dbg_rowmask)
+		DO rvar = 1_8, 5_8
+		  v = ABS(fluxresiduals_slnd(c,rvar))
+		  IF (pc_dbg_rowmask(c)) THEN
+		    l1_inband = l1_inband + v
+		  ELSE
+		    l1_spill = l1_spill + v
+		    IF (v > 1.0d-10) nspill = nspill + 1_8
+		  END IF
+		END DO
+	  END DO
+
+	  PRINT *, '[PC-DBG][', TRIM(tag), '][RES] color=', pc_dbg_color, &
+		       ' mvar=', pc_dbg_mvar, ' inband_l1=', l1_inband, &
+		       ' spill_l1=', l1_spill, ' spill_res_n=', nspill
+	END SUBROUTINE PCDBG_CHECK_RES_SPILL
 END MODULE BUFLOWMODULE_DIFF
