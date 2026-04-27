@@ -164,6 +164,7 @@ MODULE BUFLOWMODULE_DIFF
   ! ===== Jacobian construction upgrades (for ill-conditioned dR/dw) =====
   LOGICAL, SAVE :: pc_use_flux_jacobian = .FALSE.
   REAL(kind=8), SAVE :: pc_flux_jac_blend = 0.75d0
+  LOGICAL, SAVE :: pc_use_coloring_ad = .TRUE.
   ! ===== variable similarity scaling for PC matrix: A_tilde = D^{-1} A D =====
   LOGICAL, SAVE :: pc_use_var_scaling = .FALSE.
   REAL(kind=8), SAVE :: pc_var_scale_p = 8.0d0
@@ -8738,6 +8739,8 @@ CONTAINS
 
 	  INTEGER(kind=8), ALLOCATABLE :: deg(:), fill(:), nlist(:,:), row_cnt(:)
 	  INTEGER(kind=8) :: j, nnzb, p, k, nb, slot, extra_cap
+	  INTEGER(kind=8), ALLOCATABLE :: color(:)
+	  INTEGER(kind=8) :: ncolor, icolor, mvar, rvar, rcell
 	  LOGICAL :: ok
 	  REAL(kind=8) :: conv_w, diff_w
 	  REAL(kind=8) :: nx, ny, nz, amag, un, a_face, lam_face
@@ -8755,6 +8758,8 @@ CONTAINS
       REAL(kind=8) :: seed_norm, seed_blk(5,5)
 	  REAL(kind=8) :: diag_sum, diag_nrm
 	  INTEGER(kind=8) :: diag_cnt
+	  REAL(kind=8), ALLOCATABLE :: cellprimitivesd(:, :)
+	  REAL(kind=8) :: data_4d137d(1,4)
 
 	  conv_w = 1.0_8
 	  diff_w = 1.0_8
@@ -8893,83 +8898,110 @@ CONTAINS
       pc_row_inv = 1.0_8 / MAX(pc_row_scale, 1.0d-30)
       pc_col_inv = 1.0_8 / MAX(pc_col_scale, 1.0d-30)
 
-	  DO f = 1_8, nfaces - nbdryfaces
-		ownercell = faces_mesh(f,1)
-		neighbourcell = faces_mesh(f,2)
-		IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
-		IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
+      IF (pc_use_coloring_ad) THEN
+        ALLOCATE(color(ncells), cellprimitivesd(ncells,5))
+        CALL BUILD_CELL_COLORING_L2(ncells, nlist, row_cnt, color, ncolor)
+        data_4d137d = 0.0_8
+        PRINT *, '[PC-AD] coloring build enabled, ncolor=', ncolor
+        DO icolor = 1_8, ncolor
+          DO mvar = 1_8, 5_8
+            cellprimitivesd = 0.0_8
+            DO c = 1_8, ncells
+              IF (color(c) == icolor) cellprimitivesd(c,mvar) = 1.0_8
+            END DO
+            CALL COMPUTE_STEADY_RESIDUAL_D(data_4d137, data_4d137d, cellprimitives, cellprimitivesd)
+            DO c = 1_8, ncells
+              IF (color(c) /= icolor) CYCLE
+              DO i = 1_8, row_cnt(c)
+                rcell = nlist(c,i)
+                IF (rcell < 1_8 .OR. rcell > ncells) CYCLE
+                p = FIND_BLOCK_POS(rcell, c)
+                IF (p <= 0_8) CYCLE
+                DO rvar = 1_8, 5_8
+                  pc_blk(p, rvar, mvar) = fluxresiduals_slnd(rcell, rvar)
+                END DO
+              END DO
+            END DO
+          END DO
+        END DO
+        DEALLOCATE(color, cellprimitivesd)
+      ELSE
+	    DO f = 1_8, nfaces - nbdryfaces
+		  ownercell = faces_mesh(f,1)
+		  neighbourcell = faces_mesh(f,2)
+		  IF (ownercell < 1_8 .OR. ownercell > ncells) CYCLE
+		  IF (neighbourcell < 1_8 .OR. neighbourcell > ncells) CYCLE
 
-		nx = favecs_mesh(f,1)
-		ny = favecs_mesh(f,2)
-		nz = favecs_mesh(f,3)
-		amag = SQRT(nx*nx + ny*ny + nz*nz)
-		IF (amag <= 1.0d-30) CYCLE
+		  nx = favecs_mesh(f,1)
+		  ny = favecs_mesh(f,2)
+		  nz = favecs_mesh(f,3)
+		  amag = SQRT(nx*nx + ny*ny + nz*nz)
+		  IF (amag <= 1.0d-30) CYCLE
 
-		ux_face = 0.5_8*(cellprimitives(ownercell,3) + cellprimitives(neighbourcell,3))
-		uy_face = 0.5_8*(cellprimitives(ownercell,4) + cellprimitives(neighbourcell,4))
-		uz_face = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
-		t_face  = 0.5_8*(cellprimitives(ownercell,2) + cellprimitives(neighbourcell,2))
+		  ux_face = 0.5_8*(cellprimitives(ownercell,3) + cellprimitives(neighbourcell,3))
+		  uy_face = 0.5_8*(cellprimitives(ownercell,4) + cellprimitives(neighbourcell,4))
+		  uz_face = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
+		  t_face  = 0.5_8*(cellprimitives(ownercell,2) + cellprimitives(neighbourcell,2))
 
-		un = ABS((ux_face*nx + uy_face*ny + uz_face*nz) / amag)
-		a_face = SQRT(MAX(1.0d-30, fluid%gammaa*fluid%r*t_face))
-		lam_face = (un + a_face) * amag
-		lam_sum(ownercell) = lam_sum(ownercell) + lam_face
-		lam_sum(neighbourcell) = lam_sum(neighbourcell) + lam_face
+		  un = ABS((ux_face*nx + uy_face*ny + uz_face*nz) / amag)
+		  a_face = SQRT(MAX(1.0d-30, fluid%gammaa*fluid%r*t_face))
+		  lam_face = (un + a_face) * amag
+		  lam_sum(ownercell) = lam_sum(ownercell) + lam_face
+		  lam_sum(neighbourcell) = lam_sum(neighbourcell) + lam_face
 
-		eps_pc_face = eps22(f) + sigma_pc * eps44(f)
-		Dsc = eps_pc_face * amag
+		  eps_pc_face = eps22(f) + sigma_pc * eps44(f)
+		  Dsc = eps_pc_face * amag
 
-		w_face(1) = 0.5_8*(cellprimitives(ownercell,1) + cellprimitives(neighbourcell,1))
-		w_face(2) = 0.5_8*(cellprimitives(ownercell,2) + cellprimitives(neighbourcell,2))
-		w_face(3) = 0.5_8*(cellprimitives(ownercell,3) + cellprimitives(neighbourcell,3))
-		w_face(4) = 0.5_8*(cellprimitives(ownercell,4) + cellprimitives(neighbourcell,4))
-		w_face(5) = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
+		  w_face(1) = 0.5_8*(cellprimitives(ownercell,1) + cellprimitives(neighbourcell,1))
+		  w_face(2) = 0.5_8*(cellprimitives(ownercell,2) + cellprimitives(neighbourcell,2))
+		  w_face(3) = 0.5_8*(cellprimitives(ownercell,3) + cellprimitives(neighbourcell,3))
+		  w_face(4) = 0.5_8*(cellprimitives(ownercell,4) + cellprimitives(neighbourcell,4))
+		  w_face(5) = 0.5_8*(cellprimitives(ownercell,5) + cellprimitives(neighbourcell,5))
 
-		CALL BUILD_DUDW_5X5(w_face, fluid, J5)
-        IF (pc_use_cons_right_transform) THEN
-          CALL BUILD_DUDW_INV_5X5(w_face, fluid, Jcons)
-        ELSE
-          Jcons = 0.0_8
-          Jcons(1,1)=1.0_8; Jcons(2,2)=1.0_8; Jcons(3,3)=1.0_8; Jcons(4,4)=1.0_8; Jcons(5,5)=1.0_8
-        END IF
-		IF (pc_use_flux_jacobian) THEN
-		  CALL BUILD_FACE_FLUX_JACOBIAN_FD_5X5(w_face, fluid, nx, ny, nz, Jface)
-		  Jconv = pc_flux_jac_blend*Jface + (1.0_8-pc_flux_jac_blend)*(lam_face*J5)
-		ELSE
-		  Jconv = lam_face * J5
-		END IF
-		wtot = diff_w * Dsc
-        Jconv_eff = MATMUL(Jconv, Jcons)
-        Jmass_eff = MATMUL(J5, Jcons)
-		Jconv = conv_w * Jconv_eff + wtot * Jmass_eff
-        IF (pc_use_pressure_laplace_reg .AND. ALLOCATED(ccenters_mesh) .AND. &
-        &   SIZE(ccenters_mesh,1) >= ncells .AND. SIZE(ccenters_mesh,2) >= 3) THEN
-          dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
-          &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
-          &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
-          dist_on = MAX(dist_on, 1.0d-12)
-          p_lap = pc_press_laplace_beta * (amag / dist_on)
-          Jconv(1,1) = Jconv(1,1) + p_lap
-        END IF
+		  CALL BUILD_DUDW_5X5(w_face, fluid, J5)
+          IF (pc_use_cons_right_transform) THEN
+            CALL BUILD_DUDW_INV_5X5(w_face, fluid, Jcons)
+          ELSE
+            Jcons = 0.0_8
+            Jcons(1,1)=1.0_8; Jcons(2,2)=1.0_8; Jcons(3,3)=1.0_8; Jcons(4,4)=1.0_8; Jcons(5,5)=1.0_8
+          END IF
+		  IF (pc_use_flux_jacobian) THEN
+		    CALL BUILD_FACE_FLUX_JACOBIAN_FD_5X5(w_face, fluid, nx, ny, nz, Jface)
+		    Jconv = pc_flux_jac_blend*Jface + (1.0_8-pc_flux_jac_blend)*(lam_face*J5)
+		  ELSE
+		    Jconv = lam_face * J5
+		  END IF
+		  wtot = diff_w * Dsc
+          Jconv_eff = MATMUL(Jconv, Jcons)
+          Jmass_eff = MATMUL(J5, Jcons)
+		  Jconv = conv_w * Jconv_eff + wtot * Jmass_eff
+          IF (pc_use_pressure_laplace_reg .AND. ALLOCATED(ccenters_mesh) .AND. &
+          &   SIZE(ccenters_mesh,1) >= ncells .AND. SIZE(ccenters_mesh,2) >= 3) THEN
+            dist_on = SQRT((ccenters_mesh(neighbourcell,1)-ccenters_mesh(ownercell,1))**2 + &
+            &              (ccenters_mesh(neighbourcell,2)-ccenters_mesh(ownercell,2))**2 + &
+            &              (ccenters_mesh(neighbourcell,3)-ccenters_mesh(ownercell,3))**2)
+            dist_on = MAX(dist_on, 1.0d-12)
+            p_lap = pc_press_laplace_beta * (amag / dist_on)
+            Jconv(1,1) = Jconv(1,1) + p_lap
+          END IF
 
-        IF (pc_use_var_scaling) Jconv = SPREAD(pc_row_inv,2,5) * Jconv * SPREAD(pc_col_scale,1,5)
+          IF (pc_use_var_scaling) Jconv = SPREAD(pc_row_inv,2,5) * Jconv * SPREAD(pc_col_scale,1,5)
 
-        ! 体积归一化的面贡献（物理上对应 dR/dW 的行尺度 ~ 1/Vol）
-        ! 这样每个单元行都保持“对角=邻接和”的守恒结构，但修正非均匀网格上的病态尺度差
-        vol_owner = MAX(cvols_mesh(ownercell), 1.0d-30)
-        vol_neighbour = MAX(cvols_mesh(neighbourcell), 1.0d-30)
-        Jrow_owner = Jconv / vol_owner
-        Jrow_neighbour = Jconv / vol_neighbour
+          vol_owner = MAX(cvols_mesh(ownercell), 1.0d-30)
+          vol_neighbour = MAX(cvols_mesh(neighbourcell), 1.0d-30)
+          Jrow_owner = Jconv / vol_owner
+          Jrow_neighbour = Jconv / vol_neighbour
 
-		p = pc_diag_pos(ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_owner
-		p = pc_diag_pos(neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_neighbour
-		p = FIND_BLOCK_POS(ownercell, neighbourcell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_owner
-		p = FIND_BLOCK_POS(neighbourcell, ownercell)
-		IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_neighbour
-	  END DO
+		  p = pc_diag_pos(ownercell)
+		  IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_owner
+		  p = pc_diag_pos(neighbourcell)
+		  IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) + Jrow_neighbour
+		  p = FIND_BLOCK_POS(ownercell, neighbourcell)
+		  IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_owner
+		  p = FIND_BLOCK_POS(neighbourcell, ownercell)
+		  IF (p > 0_8) pc_blk(p,:,:) = pc_blk(p,:,:) - Jrow_neighbour
+	    END DO
+      END IF
 	  DO c = 1_8, ncells
 		p = pc_diag_pos(c)
 		IF (p > 0_8) THEN
@@ -11193,8 +11225,50 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 		  arr(nout) = arr(i)
 		END IF
 	  END DO
-	END SUBROUTINE SORT_UNIQUE_I8
-	SUBROUTINE PC_BUILD_RCM_ORDER(ncells, nlist, row_cnt)
+		END SUBROUTINE SORT_UNIQUE_I8
+		SUBROUTINE BUILD_CELL_COLORING_L2(ncells, nlist, row_cnt, color, ncolor)
+		  IMPLICIT NONE
+		  INTEGER(kind=8), INTENT(IN) :: ncells
+		  INTEGER(kind=8), INTENT(IN) :: nlist(:, :)
+		  INTEGER(kind=8), INTENT(IN) :: row_cnt(:)
+		  INTEGER(kind=8), INTENT(OUT) :: color(:)
+		  INTEGER(kind=8), INTENT(OUT) :: ncolor
+		  INTEGER(kind=8) :: c, i, j, n1, n2, k
+		  LOGICAL, ALLOCATABLE :: used(:)
+		  INTEGER(kind=8), PARAMETER :: max_try = 4096_8
+
+		  ALLOCATE(used(max_try))
+		  color = 0_8
+		  ncolor = 0_8
+		  DO c = 1_8, ncells
+			used = .FALSE.
+			DO i = 1_8, row_cnt(c)
+			  n1 = nlist(c, i)
+			  IF (n1 >= 1_8 .AND. n1 <= ncells) THEN
+				IF (color(n1) > 0_8 .AND. color(n1) <= max_try) used(color(n1)) = .TRUE.
+			  END IF
+			END DO
+			DO i = 1_8, row_cnt(c)
+			  n1 = nlist(c, i)
+			  IF (n1 < 1_8 .OR. n1 > ncells) CYCLE
+			  DO j = 1_8, row_cnt(n1)
+				n2 = nlist(n1, j)
+				IF (n2 < 1_8 .OR. n2 > ncells) CYCLE
+				IF (color(n2) > 0_8 .AND. color(n2) <= max_try) used(color(n2)) = .TRUE.
+			  END DO
+			END DO
+			k = 1_8
+			DO WHILE (k <= max_try)
+			  IF (.NOT. used(k)) EXIT
+			  k = k + 1_8
+			END DO
+			IF (k > max_try) k = max_try
+			color(c) = k
+			IF (k > ncolor) ncolor = k
+		  END DO
+		  DEALLOCATE(used)
+		END SUBROUTINE BUILD_CELL_COLORING_L2
+		SUBROUTINE PC_BUILD_RCM_ORDER(ncells, nlist, row_cnt)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
 	  INTEGER(kind=8), INTENT(IN) :: nlist(:, :)
