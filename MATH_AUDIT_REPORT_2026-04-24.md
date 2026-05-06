@@ -118,3 +118,15 @@ R(w, x)=0
   - `[PC-MINV-CHECK] ||rhs-A0*ApplyPC(rhs)||/||rhs||`
 - 判据：
   - 若仍显著大于 `1`，则问题**未解决**（仅表示有所改善，不代表可用）。
+
+---
+
+## 8) 4.7 根因定位回归（2026-05-06）
+- 已把最新 `BuFlow_test_d.f90` 的调试口径固定到 `tangent_gmres_max_outer=2`、`tangent_gmres_restart=50`，并在 GMRES 例程内部用 `MIN(maxiter, tangent_gmres_max_outer)` 强制截断，避免 `main_d.f90` 传入更大的 `maxiter` 时误跑 10 个 outer。
+- 保留严格线性右预条件路径，但不再禁用固定次数 inner Richardson；固定次数 `z <- z + omega * M^{-1}(rhs-A0 z)` 仍是线性算子，对齐 ADflow `NKInnerPreconIts` 对困难问题可增加局部预条件迭代的思路。
+- 本轮快速回归结果：
+  - `pc_inner_rich_iters=2`：`[PC-MINV-CHECK] = 33.066111350428585`
+  - `pc_inner_rich_iters=4`：`[PC-MINV-CHECK] = 29.127729371325877`
+  - `pc_inner_rich_iters=6`：`[PC-MINV-CHECK] = 30.334418291810071`
+- 当前采用 `pc_inner_rich_iters=4`，因为它在本轮 A/B 中 `PC-MINV` 最低，且只改变 ILU 应用链条。
+- 结论：相对原始 `4199.64` 已大幅下降，但 `29.13 >> 1`，因此 **4.7 的根因尚未完全解决**；下一步仍应继续只沿 ILU/ASM 局部预条件链条排查，而不是改 RHS/Jv 数学路径。

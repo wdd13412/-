@@ -298,7 +298,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_colored_diag_stab = 1.3d-2
   ! === 對齊 ADflow NK_innerPreConIts：對 A0 殘差重複「ILU 修正」（stationary Richardson）；預設關閉以省成本 ===
   LOGICAL, SAVE :: pc_use_inner_richardson = .TRUE.
-  INTEGER(kind=8), SAVE :: pc_inner_rich_iters = 2_8
+  INTEGER(kind=8), SAVE :: pc_inner_rich_iters = 4_8
   REAL(kind=8), SAVE :: pc_inner_rich_omega = 0.90d0
   ! 週期性全模板 Tapenade AD 重建 M（昂貴）；預設關閉
   LOGICAL, SAVE :: pc_use_full_ad_periodic = .FALSE.
@@ -8505,7 +8505,7 @@ CONTAINS
   xnrm_old, xnrm_new, znrm, rcheck, v1norm
       REAL(kind=8) :: eta_k, eta_prev, tol_b_k, phi_exp
  	  REAL(kind=8) :: eps_reg
-	  INTEGER(kind=8) :: k, j, m_dim, i, rec_k, rec_pos
+	  INTEGER(kind=8) :: k, j, m_dim, i, rec_k, rec_pos, max_outer_eff
 	  INTEGER :: mm, nn, nrhs, info_ls, lwk, mm_rec, nn_rec, info_rec, lwk_rec
 	  DOUBLE PRECISION, ALLOCATABLE :: A_ls(:,:), b_ls(:), work_ls(:), resid(:)
 	  DOUBLE PRECISION, ALLOCATABLE :: A_rec_ls(:,:), b_rec_ls(:), work_rec_ls(:)
@@ -8537,10 +8537,8 @@ CONTAINS
 	  use_ptc_local = pc_use_ptc_shift .AND. (.NOT. strict_linear_mode)
 	  IF (strict_linear_mode) THEN
 		IF (pc_use_amp_guard) PRINT *, '[ADFLOW-ALIGN] disable amp_guard for linear GMRES consistency.'
-		IF (pc_use_inner_richardson) PRINT *, '[ADFLOW-ALIGN] disable inner_richardson for fixed right-PC.'
+		! 固定次数 inner Richardson 仍是线性右预条件，保留以对齐 ADflow NKInnerPreconIts。
 		pc_use_amp_guard = .FALSE.
-		pc_use_inner_richardson = .FALSE.
-		pc_inner_rich_iters = 1_8
 	  END IF
 	  IF (pc_dafoam_consistency_mode) THEN
 		use_conservative_unknown_operator = .FALSE.
@@ -8664,7 +8662,8 @@ CONTAINS
 	  IF (use_ptc_local) ptc_step_omega = MIN(pc_ptc_outer_damp_max, MAX(pc_ptc_outer_damp_min, pc_ptc_outer_damp))
 
 	  ! ===================== 外層 restart =====================
-	  DO k = 1, maxiter
+	  max_outer_eff = MIN(maxiter, tangent_gmres_max_outer)
+	  DO k = 1, max_outer_eff
 	    IF (k == 1_8) THEN
 			  IF (use_ptc_local) THEN
 			    eta_k = pc_ptc_eta_ceiling
@@ -12633,6 +12632,19 @@ SUBROUTINE APPLY_PC_INV(vec_in, vec_out)
       CALL PC_APPLY_SCHUR_SPLIT(ncells, vin, vout)
     ELSE
       CALL PC_APPLY_M_INV(vin, vout)
+    END IF
+    ! ADflow/PETSc 的 PC 仍是固定线性算子；允许固定次数的 A0 残差修正，
+    ! 对齐 NKInnerPreconIts 思路，同时不启用非线性范数裁剪/自适应调参。
+    IF (pc_use_inner_richardson .AND. pc_inner_rich_iters > 1_8 .AND. pc_a0_ready .AND. &
+        & (.NOT. pc_use_schur_split) .AND. (.NOT. (pc_matrix_from_colored_ad .AND. pc_colored_use_diag_only))) THEN
+      ALLOCATE(Az(ncells*5), rr(ncells*5), dz(ncells*5))
+      DO istep = 2_8, pc_inner_rich_iters
+        CALL PC_APPLY_A0(ncells, vout, Az)
+        rr(1:ncells*5) = vin(1:ncells*5) - Az(1:ncells*5)
+        CALL PC_APPLY_M_INV(rr, dz)
+        vout(1:ncells*5) = vout(1:ncells*5) + pc_inner_rich_omega * dz(1:ncells*5)
+      END DO
+      DEALLOCATE(Az, rr, dz)
     END IF
     vec_out = vout
     IF (pc_use_var_scaling .OR. (pc_matrix_from_colored_ad .AND. pc_colored_similarity_scale)) THEN
