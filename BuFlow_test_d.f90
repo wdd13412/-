@@ -13276,6 +13276,9 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 		    T = T - S
 		  END IF
 		END DO
+		! ADflow/PETSc 风格的最小局部稳健化：仅对当前 5x5 对角块做弱对角增强，
+		! 避免近奇异块在 ILU 链条中放大（不改外层 Krylov 逻辑）。
+		CALL PC_STABILIZE_DIAG5_MINSHIFT(T)
 		pc_blk(p_ij,:,:) = T
 
 		CALL INVERT_5X5(pc_blk(p_ij,:,:), pc_uinv(i,:,:), inv_ok)
@@ -13346,6 +13349,34 @@ END SUBROUTINE BUILD_FACE_FLUX_JACOBIAN_FD_5X5
 	  END IF
 
 	END SUBROUTINE FACTOR_BLOCK_ILU0
+
+	SUBROUTINE PC_STABILIZE_DIAG5_MINSHIFT(A)
+	  IMPLICIT NONE
+	  REAL(kind=8), INTENT(INOUT) :: A(5,5)
+	  INTEGER :: i, j
+	  REAL(kind=8) :: rowsum, dabs, floorv, shiftv
+	  REAL(kind=8), PARAMETER :: rel_floor = 5.0d-3
+	  REAL(kind=8), PARAMETER :: abs_floor = 1.0d-12
+	  REAL(kind=8), PARAMETER :: max_shift = 2.0d-2
+
+	  DO i = 1, 5
+		rowsum = 0.0_8
+		DO j = 1, 5
+		  IF (j == i) CYCLE
+		  rowsum = rowsum + ABS(A(i,j))
+		END DO
+		dabs = ABS(A(i,i))
+		floorv = MAX(abs_floor, rel_floor*rowsum)
+		IF (dabs < floorv) THEN
+		  shiftv = MIN(max_shift*MAX(1.0_8, rowsum), floorv - dabs)
+		  IF (A(i,i) >= 0.0_8) THEN
+			A(i,i) = A(i,i) + shiftv
+		  ELSE
+			A(i,i) = A(i,i) - shiftv
+		  END IF
+		END IF
+	  END DO
+	END SUBROUTINE PC_STABILIZE_DIAG5_MINSHIFT
 	SUBROUTINE PC_TARGETED_DIAG_BOOST(ncells)
 	  IMPLICIT NONE
 	  INTEGER(kind=8), INTENT(IN) :: ncells
