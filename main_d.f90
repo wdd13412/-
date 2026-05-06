@@ -24,21 +24,15 @@ CONTAINS
 &   , file_unit_boundary, nlines_owner, file_unit_owner, &
 &   nlines_neighbour, file_unit_neighbour, nlines_faces, file_unit_faces&
 &   , startline_faces, fcount, i, bracketl, bracketr, pt_count
-    INTEGER(kind=8) :: bcount, startline_boundary, npoints, startline_points
+    INTEGER(kind=8) :: bcount, startline_boundary, npoints
 !        real(kind=8), allocatable :: point_update(:,:)  
     CHARACTER(len=256) :: meshpath, pointsfilepath, boundaryfilepath, &
 &   ownerfilepath, neighbourfilepath, facesfilepath, line
 	INTEGER(kind=8) :: n 
-    REAL(kind=8), ALLOCATABLE :: b_i(:), x_tan(:), dwdx(:, :)
-    REAL(kind=8), ALLOCATABLE :: ptc_res(:), ptc_dx(:), ptc_ax(:)
-    REAL(kind=8), ALLOCATABLE :: b_ir_orig(:), ax_ir(:), x_corr(:), b_work(:)
-    REAL(kind=8) :: tol, machnum
-    REAL(kind=8) :: ptc_sigma0, ptc_sigma, ptc_sigma_decay
-    REAL(kind=8) :: ptc_tol_start, ptc_tol_stage
-    REAL(kind=8) :: ptc_omega_stage, ptc_res_prev, ptc_res_new, bnrm_i, rn_ir, bnrm_tangent0
-    INTEGER(kind=8) :: maxiter, m_restart, c, ptc_it, ptc_steps, maxiter_stage, ir_step
-    INTEGER :: info, i_param, info_stage
-    LOGICAL :: use_tangent_ptc_outer
+    REAL(kind=8), ALLOCATABLE :: b_i(:), x_tan(:), dwdx(:, :) 	     	
+    REAL(kind=8) :: tol, machnum 
+    INTEGER(kind=8) :: maxiter, m_restart, c 
+    INTEGER :: info, i_param
     REAL(kind=8), ALLOCATABLE :: rhs_rho(:, :)
     INTEGER(kind=8), SAVE :: pc_outer_counter = 0_8
 	INTEGER(kind=8), PARAMETER :: pc_update_m = 4_8
@@ -52,7 +46,7 @@ CONTAINS
 !!!!!!!!!!!!
 !!!!!!!!!!!!!!meshdeformation
     file_unit_points = GET_FREE_UNITT()
-    meshpath = TRIM(mesh_path_runtime)
+    meshpath = 'mesh/OFairfoilMesh'
     pointsfilepath = TRIM(meshpath)//'/points'
     OPEN(unit=file_unit_points, file=pointsfilepath, status='old', &
 &  action='read', iostat=iostat) 
@@ -62,14 +56,6 @@ CONTAINS
       IF (iostat .NE. 0) THEN
         REWIND(file_unit_points) 
         ALLOCATE(lines_defor(nlines_points))
-        DO i=1,nlines_points
-          READ(file_unit_points, '(a)') lines_defor(i)
-        END DO
-        CALL OFFILE_FINDNITEMSSS(lines_defor, startline_points, npoints)
-        IF (npoints .LE. 0) THEN
-          PRINT*, 'Error: invalid points count in ', TRIM(pointsfilepath)
-          RETURN
-        END IF
         boundaryfilepath = TRIM(meshpath)//'/boundary'
         file_unit_boundary = GET_FREE_UNIT()
         OPEN(unit=file_unit_boundary, file=boundaryfilepath, status=&
@@ -136,7 +122,7 @@ CONTAINS
                             READ(file_unit_faces, '(a)', iostat=iostat) 
                             IF (iostat .NE. 0) THEN
                               REWIND(file_unit_faces) 
-                              ALLOCATE(lines_faces(nlines_faces))
+                              ALLOCATE(lines_faces(74151))
                               DO i=1,nlines_faces
                                 READ(file_unit_faces, '(a)') lines_faces&
 &                              (i)
@@ -166,7 +152,7 @@ CONTAINS
                               ALLOCATE(neighbour_tempmesh(0))
                               ALLOCATE(facepoints_tempmesh(0, 0))
                               PRINT*, 'A'
-                              ALLOCATE(points_tempmesh(npoints, 3))
+                              ALLOCATE(points_tempmesh(37243, 3))
                               CALL READOPENFOAMMESHH(meshpath, tempmesh)
                               PRINT*, 'ABC'
                               npoints = SIZE(points_tempmesh, 1)
@@ -249,7 +235,7 @@ CONTAINS
                               ALLOCATE(cellfacecount(ncells))
                               ALLOCATE(uunitvec(3))
 !        allocate(points_tempMesh(size(point_update,1), size(point_update,2))) !在readOFPointsFilef里面已经allocate
-                              ALLOCATE(points_meshdefor(npoints, 3), &
+                              ALLOCATE(points_meshdefor(37254, 3), &
 &                             source=0.0_8)
                               ALLOCATE(inoutput(99, 2))
                               ALLOCATE(wing(99, 2))
@@ -270,7 +256,7 @@ CONTAINS
 !		meshInfo = unstructuredMeshInfo(mesh) 
 !		nCells = meshInfo(1)  
 !		allocate(cellPrimitives(nCells, 5)) 
-                              ALLOCATE(cellprimitivesout(ncells, 5))
+                              ALLOCATE(cellprimitivesout(18513, 5))
 ! 显式赋值，确保 Tapenade 识别为"活跃输出"
                               cellprimitivesout = 0.0d0
                               PRINT*, 'ABC'
@@ -325,7 +311,7 @@ CONTAINS
 
 							! 對應 UunitVec, points_tempMesh, point_update
 							allocate(uunitVecd(3))
-							allocate(points_tempMeshd(nPoints, 3))
+							allocate(points_tempMeshd(37243, 3))
 							allocate(point_updated(nPoints, 3))
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -341,40 +327,18 @@ CONTAINS
                               !通过差分稳态计算残差对变形参数的偏导
                               !CALL RESIDUAL_FD_DEFORM_PARAM_VTK(data_4d137, cellprimitivesout, &
 !&   meshpath, iparam_col=1, eps_fd=1.0d-5, vtk_stem='residual_fd_x1')
-							  ncells = SIZE(cellprimitivesout, 1)
+							  ncells = 18513
 								n = ncells*5
 								ALLOCATE(b_i(n), x_tan(n), dwdx(n, 5), rhs_rho(ncells, 5))
-								tol = 1.0d-8
-								maxiter = tangent_gmres_max_outer
-								m_restart = tangent_gmres_restart
-								PRINT *, '[TANGENT-LIN] max_outer=', maxiter, ' m_restart=', m_restart, &
-								 & ' IR_steps=', tangent_linear_ir_steps
-								IF (gmres_recycle_enabled) THEN
-								  PRINT *, '[GMRES-RECYCLE] enabled'
-								ELSE
-								  PRINT *, '[GMRES-RECYCLE] disabled'
-								END IF
-								PRINT *, '[PC-JAC-PATTERN] colored L1 stencil + coloring AD (BuFlow_test_d.f90)'
-								IF (gmres_arnoldi_two_pass) THEN
-								  PRINT *, '[GMRES-ARNOLDI] MGS two-pass'
-								ELSE
-								  PRINT *, '[GMRES-ARNOLDI] MGS single-pass'
-								END IF
-								PRINT *, '[PC-OPTS] pc_colored_diag_stab=', pc_colored_diag_stab
-								IF (gmres_tangent_skip_pc) THEN
-								  PRINT *, '[TANGENT-PC] mode=nopc'
-								ELSE
-								  PRINT *, '[TANGENT-PC] mode=pc'
-								END IF
+								tol = 1.0d-8!tol = 1.0d-8
+								maxiter = 10
+								m_restart = 50
+								! 与检查报告 4.x 口径：Krylov 为 maxiter=10, m_restart=50；流场时间步解用 endtime=600 在 COMPUTE_CFD 内
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8
+								! 更新 fluxresiduals_sln，供式(828) 預條件對 (T+A1) 的 T 與 COMPUTE_PC_TZINGER_T
+								!CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitivesout)
 								CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)   ! 先建一次，保证本轮开着
-								use_tangent_ptc_outer = .FALSE.
-								ptc_steps = 3_8
-								ptc_sigma0 = 0.80d0
-								ptc_sigma_decay = 0.35d0
-								ptc_tol_start = 5.0d-4
-								ptc_omega_stage = 0.75d0
 
 								DO i_param = 1, 1
 								!DO i_param = 1, 4
@@ -386,74 +350,11 @@ CONTAINS
 								  ! 只取每个单元的 P 分量
 									  rhs_rho(c, i_param) = b_i((c-1)*5 + 1)   
 								  END DO
-								  ! 第二個開始用前一個 x_tan 作初值,可以加速收敛
+								 ! 第二個開始用前一個 x_tan 作初值,可以加速收敛
 								  x_tan = 0.0_8
-								  IF (use_tangent_ptc_outer) THEN
-									ALLOCATE(ptc_res(n), ptc_dx(n), ptc_ax(n))
-									ptc_res = b_i
-									ptc_sigma = ptc_sigma0
-									ptc_tol_stage = MAX(tol, ptc_tol_start)
-									ptc_res_prev = SQRT(SUM(ptc_res*ptc_res))
-									bnrm_i = MAX(1.0d-30, SQRT(SUM(b_i*b_i)))
 
-									DO ptc_it = 1_8, ptc_steps
-									  CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)
-									  pc_use_ptc_shift = .TRUE.
-									  pc_ptc_alpha = MIN(pc_ptc_alpha_max, MAX(pc_ptc_alpha_min, ptc_sigma))
-									  maxiter_stage = MAX(3_8, maxiter-1_8)
-									  ptc_dx = 0.0_8
-									  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, ptc_res, ptc_dx, &
-									& ptc_tol_stage, maxiter_stage, m_restart, info_stage)
-									  x_tan = x_tan + ptc_omega_stage * ptc_dx
-
-									  CALL TANGENT_MATVEC(data_4d137, cellprimitivesout, n, x_tan, ptc_ax)
-									  ptc_res = b_i - ptc_ax
-									  ptc_res_new = SQRT(SUM(ptc_res*ptc_res))
-									  PRINT *, '[PTC-OUTER] param=', i_param, ' it=', ptc_it, ' sigma=', ptc_sigma, &
-									& ' tol_lin=', ptc_tol_stage, ' ||r||/||b||=', ptc_res_new/bnrm_i, ' info=', info_stage
-									  IF (ptc_res_new <= tol * bnrm_i) EXIT
-									  IF (ptc_res_new > 0.95d0 * ptc_res_prev) THEN
-										ptc_omega_stage = MAX(0.35d0, 0.80d0*ptc_omega_stage)
-									  ELSE
-										ptc_omega_stage = MIN(0.90d0, 1.05d0*ptc_omega_stage)
-									  END IF
-									  ptc_res_prev = ptc_res_new
-									  ptc_sigma = MAX(0.05d0, ptc_sigma * ptc_sigma_decay)
-									  ptc_tol_stage = MAX(tol, ptc_tol_stage * 0.20d0)
-									END DO
-
-									! final polish on original system (sigma=0)
-									pc_use_ptc_shift = .FALSE.
-									CALL BUILD_PC_JST_L1(data_4d137, cellprimitivesout)
-									CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
-									DEALLOCATE(ptc_res, ptc_dx, ptc_ax)
-								  ELSE
-									IF (tangent_linear_ir_steps <= 1) THEN
-									  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
-									ELSE
-									  PRINT *, '[TANGENT-IR] matrix-free iterative refinement, steps=', tangent_linear_ir_steps
-									  ALLOCATE(b_ir_orig(n), ax_ir(n), x_corr(n), b_work(n))
-									  b_ir_orig(1:n) = b_i(1:n)
-									  bnrm_tangent0 = SQRT(SUM(b_ir_orig(1:n)*b_ir_orig(1:n)))
-									  x_tan = 0.0_8
-									  DO ir_step = 1_8, MAX(1_8, tangent_linear_ir_steps)
-										IF (ir_step == 1_8) THEN
-										  b_work(1:n) = b_ir_orig(1:n)
-										ELSE
-										  CALL TANGENT_MATVEC(data_4d137, cellprimitivesout, n, x_tan, ax_ir)
-										  b_work(1:n) = b_ir_orig(1:n) - ax_ir(1:n)
-										END IF
-										x_corr = 0.0_8
-										CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_work, x_corr, tol, maxiter, m_restart, info)
-										x_tan(1:n) = x_tan(1:n) + x_corr(1:n)
-										CALL TANGENT_MATVEC(data_4d137, cellprimitivesout, n, x_tan, ax_ir)
-										rn_ir = SQRT(SUM((b_ir_orig(1:n)-ax_ir(1:n))*(b_ir_orig(1:n)-ax_ir(1:n))))
-										PRINT *, '[TANGENT-IR] ir_step=', ir_step, ' ||r||/||b||=', rn_ir/MAX(1.0d-300, bnrm_tangent0), ' info=', info
-										IF (rn_ir <= tol * bnrm_tangent0) EXIT
-									  END DO
-									  DEALLOCATE(b_ir_orig, ax_ir, x_corr, b_work)
-									END IF
-								  END IF
+								  !无雅可比矩阵GMRES方法(正向自动微分求解矩阵向量积)求解dw/dx
+								  CALL SOLVE_TANGENT_JFGMRES(data_4d137, cellprimitivesout, n, b_i, x_tan, tol, maxiter, m_restart, info)
 								  !x_tan表示的是一个变形参数的dw/dx,维度为（ncells*5）,dwdx表示的是四个变形参数的dw/dx，维度为（ncells*5，4）
 								  dwdx(1:n, i_param) = x_tan
 								  PRINT *, 'Tangent param ', i_param, ' GMRES info=', info
@@ -473,7 +374,7 @@ CONTAINS
 								rhs_rho(1:ncells, 5) = 0.0_8!这里实际上是对mach的导数
     							PRINT *, 'Tangent param (Mach) GMRES info=', info
     							!输出vtk,csv
-								meshpath = TRIM(mesh_path_runtime)
+								meshpath = 'mesh/OFairfoilMesh'
 								CALL OUTPUT_WALL_CP_CSV(meshpath, point_update, cellprimitivesout, dwdx, ncells, 'wall_cp_data.csv')
 								print *, "ABD"
 								CALL COMPUTE_STEADY_RESIDUAL(data_4d137, cellprimitivesout)
@@ -701,7 +602,7 @@ CONTAINS
 &   , file_unit_boundary, nlines_owner, file_unit_owner, &
 &   nlines_neighbour, file_unit_neighbour, nlines_faces, file_unit_faces&
 &   , startline_faces, fcount, i, bracketl, bracketr, pt_count
-    INTEGER(kind=8) :: bcount, startline_boundary, npoints, startline_points
+    INTEGER(kind=8) :: bcount, startline_boundary, npoints
     CHARACTER(len=256) :: meshpath, pointsfilepath, boundaryfilepath, &
 &   ownerfilepath, neighbourfilepath, facesfilepath, line
     TYPE(MESHDATA) :: tempmesh
@@ -710,7 +611,7 @@ CONTAINS
     INTRINSIC SIZE
     INTRINSIC MAXVAL
     INTRINSIC ALLOCATED
-    meshpath = TRIM(mesh_path_runtime)
+    meshpath = 'mesh/OFairfoilMesh'
     file_unit_points = GET_FREE_UNITT()
     pointsfilepath = TRIM(meshpath)//'/points'
     OPEN(unit=file_unit_points, file=pointsfilepath, status='old', &
@@ -721,14 +622,6 @@ CONTAINS
       IF (iostat .NE. 0) THEN
         REWIND(file_unit_points) 
         ALLOCATE(lines_defor(nlines_points))
-        DO i=1,nlines_points
-          READ(file_unit_points, '(a)') lines_defor(i)
-        END DO
-        CALL OFFILE_FINDNITEMSSS(lines_defor, startline_points, npoints)
-        IF (npoints .LE. 0) THEN
-          PRINT*, 'Error: invalid points count in ', TRIM(pointsfilepath)
-          RETURN
-        END IF
         boundaryfilepath = TRIM(meshpath)//'/boundary'
         file_unit_boundary = GET_FREE_UNIT()
         OPEN(unit=file_unit_boundary, file=boundaryfilepath, status=&
@@ -789,7 +682,7 @@ CONTAINS
                             READ(file_unit_faces, '(a)', iostat=iostat) 
                             IF (iostat .NE. 0) THEN
                               REWIND(file_unit_faces) 
-                              ALLOCATE(lines_faces(nlines_faces))
+                              ALLOCATE(lines_faces(74151))
                               DO i=1,nlines_faces
                                 READ(file_unit_faces, '(a)') lines_faces&
 &                              (i)
@@ -811,7 +704,7 @@ CONTAINS
                               ALLOCATE(owner_tempmesh(0))
                               ALLOCATE(neighbour_tempmesh(0))
                               ALLOCATE(facepoints_tempmesh(0, 0))
-                              ALLOCATE(points_tempmesh(npoints, 3))
+                              ALLOCATE(points_tempmesh(37243, 3))
                               CALL READOPENFOAMMESHH(meshpath, tempmesh)
                               npoints = SIZE(points_tempmesh, 1)
                               nfaces = SIZE(owner_tempmesh)
@@ -885,7 +778,7 @@ CONTAINS
 &                             1, :)), 3))
                               ALLOCATE(cellfacecount(ncells))
                               ALLOCATE(uunitvec(3))
-                              ALLOCATE(points_meshdefor(npoints, 3), &
+                              ALLOCATE(points_meshdefor(37254, 3), &
 &                             source=0.0_8)
                               ALLOCATE(inoutput(99, 2))
                               ALLOCATE(wing(99, 2))
@@ -1094,4 +987,3 @@ CONTAINS
   END FUNCTION ISNUMBERRR
 
 END MODULE MAIN_MODULE_DIFF
-
