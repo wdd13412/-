@@ -5,51 +5,20 @@
 program RUN_MAIN_NODIFF
 ! 关键：使用包含main的模块，自动获取显式接口
   USE MAIN_MODULE_DIFF
-  USE TYPESMODULE_DIFF, ONLY: mesh_path_runtime, deformation_mode_runtime, &
-& deformation_mode_airfoil, deformation_mode_cylinder, &
-& cylinder_axis_ratio_runtime
   IMPLICIT NONE
 ! 输入参数
   REAL(kind=8) :: data_4d137(1, 4)
 !    !$AD INPUT  ! 标记为微分的输入变量（自变量）
   REAL(kind=8), ALLOCATABLE :: cellprimitivesout(:, :)
-  CHARACTER(len=*), PARAMETER :: mesh_case = 'mesh1'
-  CHARACTER(len=*), PARAMETER :: deformation_case = 'cylinder'
   INTRINSIC ALLOCATED
   INTRINSIC SIZE
 !    real(kind=8), allocatable :: fluxResidualsOut(:,:)
-! 切线/预条件/GMRES：改 BuFlow_test_d.f90 模块顶部 SAVE 变量
-! 一键切换：mesh_case、deformation_case
-! ============================================================
-  IF (mesh_case .EQ. 'mesh') THEN
-    mesh_path_runtime = 'mesh/OFairfoilMesh'
-  ELSE IF (mesh_case .EQ. 'mesh1') THEN
-    mesh_path_runtime = 'mesh1/OFairfoilMesh'
-  ELSE
-    PRINT *, 'Error: unsupported mesh_case = ', mesh_case
-    STOP
-  END IF
-  IF (deformation_case .EQ. 'airfoil') THEN
-    deformation_mode_runtime = deformation_mode_airfoil
-  ELSE IF (deformation_case .EQ. 'cylinder') THEN
-    deformation_mode_runtime = deformation_mode_cylinder
-  ELSE
-    PRINT *, 'Error: unsupported deformation_case = ', deformation_case
-    STOP
-  END IF
-! 圆柱模式参数（长短轴比）
-  cylinder_axis_ratio_runtime = 1.15d0
-  data_4d137 = 0.0d0
-  IF (deformation_mode_runtime .EQ. deformation_mode_airfoil) THEN
-! 翼型模式：沿用原四个参数
-    data_4d137(1, 1) = -0.75d0
-    data_4d137(1, 2) = 0.485d0
-    data_4d137(1, 3) = -0.588d0
-    data_4d137(1, 4) = -0.912d0
-  ELSE
-! 圆柱模式：只使用 data_4d137(1,1)
-    data_4d137(1, 1) = cylinder_axis_ratio_runtime
-  END IF
+  data_4d137(1, 1) = -0.75d0
+!   data_4D137(1,2:4) = 0.0d0  ! 后三个维度固定为0
+  data_4d137(1, 2) = 0.485d0
+  data_4d137(1, 3) = -0.588d0
+! 后三个维度固定为0 
+  data_4d137(1, 4) = -0.912d0
 ! 调用main子程序（此时编译器已知晓其接口，支持可分配数组参数）
   CALL MAIN(data_4d137, cellprimitivesout)
   IF (ALLOCATED(cellprimitivesout)) THEN
@@ -62,4 +31,3 @@ program RUN_MAIN_NODIFF
     DEALLOCATE(fluxresiduals)
   END IF
 END program RUN_MAIN_NODIFF
-
