@@ -13,6 +13,7 @@ MODULE TYPESMODULE_DIFF
   INTEGER, PARAMETER :: int64=8
 ! 8字节实数（双精度）
   INTEGER, PARAMETER :: real64=8
+  
   CHARACTER(len=256), ALLOCATABLE :: lines_defor(:)
 !!!!!!!!!!!!!!!!Buflow
 !    real(kind=8), allocatable :: first5_refs(:,:)  ! 形状(5,3)!!!!!!!!!!!!
@@ -102,7 +103,6 @@ MODULE TYPESMODULE_DIFF
   REAL(kind=8), ALLOCATABLE :: point_update(:, :)
   REAL(kind=8), ALLOCATABLE :: point_updated(:, :)
   REAL(kind=8), ALLOCATABLE :: wing(:, :), inoutput(:, :)
-!!!!!!!!!runtime config
   INTEGER(kind=8), PARAMETER :: deformation_mode_airfoil=1_8
   INTEGER(kind=8), PARAMETER :: deformation_mode_cylinder=2_8
   INTEGER(kind=8) :: deformation_mode_runtime = deformation_mode_airfoil
@@ -115,4 +115,3 @@ MODULE TYPESMODULE_DIFF
 & cellprimitivesoutb_adj(:, :)
   REAL(kind=8) :: data_4d137_adj(1, 4), data_4d137b_adj(1, 4)
 END MODULE TYPESMODULE_DIFF
-
