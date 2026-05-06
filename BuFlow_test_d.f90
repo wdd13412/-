@@ -375,8 +375,8 @@ MODULE BUFLOWMODULE_DIFF
   ! ------------------------------------------------------------------
   INTEGER(kind=8), SAVE :: tangent_linear_ir_steps = 1_8
   ! 外層輪數與子空間：過大則每線性步極慢；相對殘差 1e-5 需「M≈A」或 PTC，不能只堆 Krylov 維度。
-  INTEGER(kind=8), SAVE :: tangent_gmres_max_outer = 12_8
-  INTEGER(kind=8), SAVE :: tangent_gmres_restart = 90_8
+  INTEGER(kind=8), SAVE :: tangent_gmres_max_outer = 2_8
+  INTEGER(kind=8), SAVE :: tangent_gmres_restart = 50_8
   ! 右预条件 GMRES 更新 x <- x + omega*ptc*z 中對 z 的額外阻尼（0~1）；||A z|| 極大時可試 0.25~0.5
   REAL(kind=8), SAVE :: tangent_gmres_dx_damp = 1.0_8
   ! 無 PTC 時，外層 k>1：eta_k = max(本下限, 0.5*eta_prev^phi)；原硬編 0.2 易使 res_ls≤eta*β 過嚴
