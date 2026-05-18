@@ -331,7 +331,7 @@ CONTAINS
 								n = ncells*5
 								ALLOCATE(b_i(n), x_tan(n), dwdx(n, 5), rhs_rho(ncells, 5))
 								tol = 1.0d-8!tol = 1.0d-8
-								maxiter = 10
+								maxiter = 2
 								m_restart = 50
 								! ===== 新增：建預條件（只需一次（或每个网格/基底一次））
 								pc_outer_counter = 0_8

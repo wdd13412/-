@@ -227,6 +227,7 @@ MODULE BUFLOWMODULE_DIFF
   REAL(kind=8), SAVE :: pc_ptc_outer_damp = 0.65d0
   REAL(kind=8), SAVE :: pc_ptc_outer_damp_min = 0.20d0
   REAL(kind=8), SAVE :: pc_ptc_outer_damp_max = 0.95d0
+  REAL(kind=8), SAVE :: tangent_gmres_dx_damp = 0.35d0
   REAL(kind=8), SAVE :: pc_ptc_outer_grow = 1.08d0
   REAL(kind=8), SAVE :: pc_ptc_outer_shrink = 0.82d0
   REAL(kind=8), SAVE :: pc_ptc_eta_floor = 0.03d0
@@ -535,7 +536,7 @@ CONTAINS
 ! 已知初始时间步
     initdt = 0.0000001
 !36.5       ! 已知总仿真时间!!!!!
-    endtime = 800
+    endtime = 600
 ! 已知输出间隔
     outputinterval = 25
 ! 已知目标CFL数
@@ -8605,7 +8606,7 @@ CONTAINS
 
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||A*delta_x||=', delta_w_norm, &
 		&         ' ||r_old||=', r_old_norm, ' ratio=', delta_w_norm/ MAX(1.0d-300, r_old_norm)
-		x(1:n) = x(1:n) + ptc_step_omega * z(1:n)
+		x(1:n) = x(1:n) + ptc_step_omega * tangent_gmres_dx_damp * z(1:n)
 		xnrm_new = SQRT(SUM(x(1:n)*x(1:n)))
 		PRINT *, '[GMRES-DBG] outer=', k, ' ||x_new||=', xnrm_new
 
