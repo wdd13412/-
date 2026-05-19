@@ -1,0 +1,7 @@
+cfd_solver
+*.mod
+*.o
+*.vtk
+cfd_output.log
+wall_cp_data.csv
+wing_update.csv
